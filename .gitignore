@@ -34,6 +34,20 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Env files whose name has no leading dot slip past the `.env*` rule above,
+# which is how a file called `env.local` nearly ended up in this repo. Anything
+# ending in `.local` is local-only by definition — keep it out.
+env*.local
+*.local
+!*.local.example
+
+# Scratch folder where downloaded patches and attachments land. Working files,
+# never source of truth — the real files live in src/ and supabase/.
+Claude outputs/
+
+# Patch archives. The code they contain is already committed as real files.
+*.zip
+
 # vercel
 .vercel
 

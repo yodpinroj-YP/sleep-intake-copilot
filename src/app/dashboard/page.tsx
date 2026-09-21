@@ -2,9 +2,11 @@ import { redirect } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { IntakeSessionsPanel } from "@/components/intake-sessions-panel";
+import { ClinicianIntakePanel } from "@/components/clinician-intake-panel";
 import { ClinicianReviewPanel } from "@/components/clinician-review-panel";
 import { createClient } from "@/lib/supabase/server";
 import {
+  listIntakeSessionsForReview,
   listMyIntakeSessions,
   listPendingClinicianSummaries,
 } from "@/services/intake/service";
@@ -29,9 +31,12 @@ export default async function DashboardPage() {
   const isClinician = profile?.role === "clinician" || profile?.role === "admin";
 
   const sessions = isClinician ? [] : await listMyIntakeSessions(supabase, user.id);
-  const pendingSummaries = isClinician
-    ? await listPendingClinicianSummaries(supabase)
-    : [];
+  const [pendingSummaries, intakesForReview] = isClinician
+    ? await Promise.all([
+        listPendingClinicianSummaries(supabase),
+        listIntakeSessionsForReview(supabase),
+      ])
+    : [[], []];
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
@@ -50,7 +55,10 @@ export default async function DashboardPage() {
       </div>
 
       {isClinician ? (
-        <ClinicianReviewPanel initialSummaries={pendingSummaries} />
+        <>
+          <ClinicianIntakePanel sessions={intakesForReview} />
+          <ClinicianReviewPanel initialSummaries={pendingSummaries} />
+        </>
       ) : (
         <IntakeSessionsPanel initialSessions={sessions} />
       )}

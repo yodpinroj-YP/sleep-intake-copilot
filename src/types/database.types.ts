@@ -62,6 +62,7 @@ export interface Database {
           chief_complaint: string | null;
           height_cm: number | null;
           weight_kg: number | null;
+          neck_circumference_cm: number | null;
           bmi: number | null;
           started_at: string | null;
           completed_at: string | null;
@@ -74,6 +75,7 @@ export interface Database {
           chief_complaint?: string | null;
           height_cm?: number | null;
           weight_kg?: number | null;
+          neck_circumference_cm?: number | null;
           started_at?: string | null;
           completed_at?: string | null;
           created_at?: string;
@@ -85,6 +87,7 @@ export interface Database {
           chief_complaint?: string | null;
           height_cm?: number | null;
           weight_kg?: number | null;
+          neck_circumference_cm?: number | null;
           started_at?: string | null;
           completed_at?: string | null;
           created_at?: string;

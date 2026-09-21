@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useTransition } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -172,14 +173,21 @@ export function IntakeSessionsPanel({ initialSessions }: { initialSessions: Inta
                         </Button>
                       </>
                     ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={isPending}
-                        onClick={() => startEditing(session)}
-                      >
-                        Edit
-                      </Button>
+                      <>
+                        <Button size="sm" asChild>
+                          <Link href={`/intake/${session.id}`}>
+                            ทำแบบสอบถาม STOP-BANG
+                          </Link>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isPending}
+                          onClick={() => startEditing(session)}
+                        >
+                          Edit
+                        </Button>
+                      </>
                     )}
                     <Button
                       size="sm"
