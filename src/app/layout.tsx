@@ -18,7 +18,23 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   // screen reader which language to pronounce and the browser how to hyphenate.
   return (
     <html lang="th" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      {/*
+        suppressHydrationWarning is on <body> and nowhere else, on purpose.
+
+        Browser extensions — Grammarly is the usual culprit, adding
+        data-gr-ext-installed and data-new-gr-c-s-check-loaded — modify <body>
+        before React hydrates, so the markup React finds no longer matches what
+        the server sent. React reports that as a hydration error even though
+        nothing in this codebase is wrong, and the noise trains you to ignore
+        the console, which is where the real bugs appear.
+
+        This suppresses the warning for THIS element's own attributes only. It
+        does not extend to children, so a genuine hydration mismatch anywhere
+        inside the app still surfaces normally.
+      */}
+      <body suppressHydrationWarning className="min-h-full flex flex-col">
+        {children}
+      </body>
     </html>
   );
 }

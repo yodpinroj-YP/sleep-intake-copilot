@@ -37,6 +37,63 @@ import type { ClinicianSessionView } from "@/services/intake/service";
 // scoring and flagging rules.
 // ---------------------------------------------------------------------------
 
+/** The eight ESS items, in questionnaire order, matching the scoring engine. */
+const ESS_ITEMS: { field: string; label: string }[] = [
+  { field: "sittingReading", label: "Sitting and reading" },
+  { field: "watchingTv", label: "Watching TV" },
+  { field: "sittingPublic", label: "Sitting inactive in public" },
+  { field: "passengerCar", label: "Passenger in a car for an hour" },
+  { field: "lyingAfternoon", label: "Lying down in the afternoon" },
+  { field: "sittingTalking", label: "Sitting and talking" },
+  { field: "afterLunch", label: "Sitting quietly after lunch" },
+  { field: "inCarTraffic", label: "Stopped in traffic" },
+];
+
+/**
+ * Builds a demo ESS result from the eight item answers.
+ *
+ * The total, the answered count, the ceiling and the severity band are all
+ * DERIVED here rather than typed in by hand, using the same arithmetic and the
+ * same cut-offs as the real engine. Hand-written demo numbers drift: someone
+ * edits an answer, forgets to update the total, and the page quietly starts
+ * showing a score that the system it is demonstrating would never produce.
+ */
+function demoEss(
+  scores: (number | null)[],
+  computedAt: string
+): NonNullable<ClinicianSessionView["ess"]> {
+  const breakdown = ESS_ITEMS.map((item, index) => ({
+    field: item.field,
+    position: index + 1,
+    label: item.label,
+    score: scores[index],
+    answered: scores[index] !== null,
+  }));
+
+  const score = breakdown.reduce((sum, item) => sum + (item.score ?? 0), 0);
+  const answeredCount = breakdown.filter((item) => item.answered).length;
+  const missing = breakdown.length - answeredCount;
+
+  const severity =
+    score >= 16
+      ? "severe"
+      : score >= 13
+        ? "moderate"
+        : score >= 11
+          ? "mild"
+          : "normal";
+
+  return {
+    score,
+    severity,
+    incomplete: missing > 0,
+    answeredCount,
+    maxPossibleScore: score + missing * 3,
+    breakdown,
+    computedAt,
+  };
+}
+
 const DEMO_SESSIONS: ClinicianSessionView[] = [
   {
     id: "demo-1",
@@ -63,12 +120,20 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       ],
       computedAt: "2026-09-18T09:24:00.000Z",
     },
+    ess: demoEss([2, 3, 2, 3, 2, 1, 2, 2], "2026-09-18T09:26:00.000Z"),
     flags: [
       {
         id: "demo-flag-1",
         flagType: "high_osa_risk",
         severity: "standard",
         triggerSource: "STOP-BANG score 6/8 (cut-off 5)",
+        acknowledgedAt: null,
+      },
+      {
+        id: "demo-flag-1b",
+        flagType: "severe_sleepiness",
+        severity: "standard",
+        triggerSource: "ESS score 17/24 (cut-off 16)",
         acknowledgedAt: null,
       },
     ],
@@ -98,6 +163,7 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       ],
       computedAt: "2026-09-19T14:09:00.000Z",
     },
+    ess: demoEss([3, 3, null, 2, null, 1, 2, null], "2026-09-19T14:11:00.000Z"),
     flags: [],
   },
   {
@@ -125,6 +191,7 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       ],
       computedAt: "2026-09-20T08:43:00.000Z",
     },
+    ess: demoEss([1, 1, 0, 1, 0, 0, 1, 0], "2026-09-20T08:45:00.000Z"),
     flags: [],
   },
   {
@@ -152,7 +219,19 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       ],
       computedAt: "2026-09-21T19:18:00.000Z",
     },
-    flags: [],
+    // Total 9 — comfortably "normal" — but a 3 on the traffic item. This is
+    // the case the urgent rule exists for, and the reason it is keyed on the
+    // item rather than on the total.
+    ess: demoEss([1, 1, 1, 1, 1, 1, 0, 3], "2026-09-21T19:20:00.000Z"),
+    flags: [
+      {
+        id: "demo-flag-4",
+        flagType: "drowsy_driving",
+        severity: "urgent",
+        triggerSource: "ESS item 8 (stopped in traffic) = 3/3",
+        acknowledgedAt: null,
+      },
+    ],
   },
 ];
 
@@ -207,7 +286,11 @@ export default function ClinicianDemoPage() {
             เคสที่สามได้ 4 คะแนนเท่ากัน แต่ตอบครบทั้ง 8 ข้อ — คะแนนเท่ากันแต่ความหมายทางคลินิกต่างกัน
           </li>
           <li>
-            เคสที่สี่คะแนน 1/8 ไม่มีสัญญาณเตือน เพราะระบบไม่ได้ตีตราทุกคนว่าเสี่ยง
+            เคสที่สี่คือเคสที่สำคัญที่สุด — STOP-BANG เพียง 1/8 และ ESS รวม 9/24
+            ซึ่งอยู่ในเกณฑ์ปกติทั้งคู่ แต่ผู้ป่วยตอบข้อ 8 (งีบขณะรถติด) เต็ม 3 คะแนน
+            ระบบจึงขึ้นสัญญาณเตือน<strong>ระดับด่วน</strong>เรื่องการขับขี่
+            กฎข้อนี้ผูกกับคำตอบรายข้อ ไม่ใช่คะแนนรวม เพราะถ้าผูกกับคะแนนรวม
+            จะพลาดคนกลุ่มนี้พอดี
           </li>
         </ul>
       </div>

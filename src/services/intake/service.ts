@@ -2,6 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { ESS_DOMAIN, ESS_QUESTION_KEYS } from "@/lib/ess";
 import { STOPBANG_DOMAIN, STOPBANG_QUESTION_KEYS } from "@/lib/stopbang";
 import type { Database, ReviewStatus } from "@/types/database.types";
 
@@ -156,6 +157,92 @@ export async function getStopBangAnswers(
   return answers;
 }
 
+/**
+ * Writes one questionnaire's answers to `intake_responses`.
+ *
+ * Shared by every instrument, because the awkward part is the same for all of
+ * them: `intake_responses` has no unique constraint on
+ * (session_id, question_key) and patients have no DELETE policy on it, so an
+ * upsert is not available. This reads what is already there, updates those
+ * rows, and inserts only the missing ones — which is what keeps re-submitting
+ * a form from piling up duplicate, conflicting answers for the same question.
+ *
+ * Values that are neither a boolean nor a finite number are skipped rather
+ * than stored. `answer_value` is jsonb and would happily accept a string or a
+ * null, and a scoring engine reading that back would treat it as unanswered —
+ * so the row would exist, look answered in the database, and score as a gap.
+ * Refusing it here keeps those two views of the data honest.
+ */
+async function saveStructuredResponses(
+  supabase: TypedSupabaseClient,
+  sessionId: string,
+  domain: string,
+  questionKeys: readonly string[],
+  answers: Record<string, unknown>
+): Promise<void> {
+  const { data: existing, error: existingError } = await supabase
+    .from("intake_responses")
+    .select("id, question_key")
+    .eq("session_id", sessionId)
+    .in("question_key", questionKeys as string[]);
+
+  if (existingError) {
+    throw new Error(`Failed to read existing answers: ${existingError.message}`);
+  }
+
+  const existingByKey = new Map(
+    (existing ?? []).map((row) => [row.question_key, row.id])
+  );
+
+  const toInsert: {
+    session_id: string;
+    question_key: string;
+    question_domain: string;
+    answer_value: boolean | number;
+    source: "structured_choice";
+  }[] = [];
+
+  for (const key of questionKeys) {
+    const value = answers[key];
+
+    const usable =
+      typeof value === "boolean" ||
+      (typeof value === "number" && Number.isFinite(value));
+
+    if (!usable) continue;
+
+    const storable = value as boolean | number;
+    const existingId = existingByKey.get(key);
+
+    if (existingId) {
+      const { error } = await supabase
+        .from("intake_responses")
+        .update({ answer_value: storable })
+        .eq("id", existingId);
+
+      if (error) {
+        throw new Error(`Failed to update answer "${key}": ${error.message}`);
+      }
+    } else {
+      toInsert.push({
+        session_id: sessionId,
+        question_key: key,
+        question_domain: domain,
+        answer_value: storable,
+        source: "structured_choice",
+      });
+    }
+  }
+
+  if (toInsert.length > 0) {
+    const { error } = await supabase.from("intake_responses").insert(toInsert);
+
+    if (error) {
+      throw new Error(`Failed to save answers: ${error.message}`);
+    }
+  }
+}
+
 export interface StopBangIntakeInput {
   heightCm: number | null;
   weightKg: number | null;
@@ -224,68 +311,116 @@ export async function saveStopBangIntake(
   }
 
   // 3. The four questionnaire answers.
-  //
-  // intake_responses has no unique constraint on (session_id, question_key)
-  // and patients have no DELETE policy on it, so this updates rows that
-  // already exist and inserts only the ones that don't — which is also what
-  // keeps re-submitting the form from piling up duplicate answers.
-  const { data: existing, error: existingError } = await supabase
-    .from("intake_responses")
-    .select("id, question_key")
-    .eq("session_id", sessionId)
-    .in("question_key", STOPBANG_QUESTION_KEYS);
-
-  if (existingError) {
-    throw new Error(`Failed to read existing answers: ${existingError.message}`);
-  }
-
-  const existingByKey = new Map(
-    (existing ?? []).map((row) => [row.question_key, row.id])
+  await saveStructuredResponses(
+    supabase,
+    sessionId,
+    STOPBANG_DOMAIN,
+    STOPBANG_QUESTION_KEYS,
+    input.answers
   );
 
-  const toInsert: {
-    session_id: string;
-    question_key: string;
-    question_domain: string;
-    answer_value: boolean;
-    source: "structured_choice";
-  }[] = [];
+  return session;
+}
 
-  for (const key of STOPBANG_QUESTION_KEYS) {
-    const value = input.answers[key];
-    if (typeof value !== "boolean") continue;
+/**
+ * The ESS answers already saved on a session, as a { question_key: 0|1|2|3 }
+ * map, so the form can be reopened with the patient's previous answers
+ * selected rather than blank.
+ *
+ * Keys whose stored value is not one of the four valid scores are left out
+ * entirely rather than defaulted to 0. A questionnaire that shows a patient an
+ * answer they never gave is worse than one that shows a blank.
+ */
+export async function getEssAnswers(
+  supabase: TypedSupabaseClient,
+  sessionId: string
+): Promise<Record<string, number>> {
+  const { data, error } = await supabase
+    .from("intake_responses")
+    .select("question_key, answer_value")
+    .eq("session_id", sessionId)
+    .in("question_key", ESS_QUESTION_KEYS);
 
-    const existingId = existingByKey.get(key);
-
-    if (existingId) {
-      const { error } = await supabase
-        .from("intake_responses")
-        .update({ answer_value: value })
-        .eq("id", existingId);
-
-      if (error) {
-        throw new Error(`Failed to update answer "${key}": ${error.message}`);
-      }
-    } else {
-      toInsert.push({
-        session_id: sessionId,
-        question_key: key,
-        question_domain: STOPBANG_DOMAIN,
-        answer_value: value,
-        source: "structured_choice",
-      });
-    }
+  if (error) {
+    throw new Error(`Failed to load saved answers: ${error.message}`);
   }
 
-  if (toInsert.length > 0) {
-    const { error } = await supabase.from("intake_responses").insert(toInsert);
-
-    if (error) {
-      throw new Error(`Failed to save answers: ${error.message}`);
+  const answers: Record<string, number> = {};
+  for (const row of data ?? []) {
+    const value = row.answer_value;
+    if (value === 0 || value === 1 || value === 2 || value === 3) {
+      answers[row.question_key] = value;
     }
   }
+  return answers;
+}
+
+export interface EssIntakeInput {
+  /** question_key -> 0|1|2|3. Keys not in ESS_QUESTION_KEYS are ignored. */
+  answers: Record<string, number>;
+}
+
+/**
+ * Saves the ESS answers for one session.
+ *
+ * Simpler than its STOP-BANG counterpart because ESS asks nothing about the
+ * person or their measurements — all eight items are questions, so there is
+ * only one table to write to.
+ *
+ * The session is read first, filtered by patient_id, for two reasons: the
+ * caller needs the session row back, and reaching the next line proves the
+ * signed-in user owns this session, which is what makes it safe for the route
+ * to hand the id to the service-role scoring engine afterwards. RLS would stop
+ * a foreign write regardless, but an explicit check here fails cleanly with
+ * "not found" instead of a confusing partial save.
+ */
+export async function saveEssIntake(
+  supabase: TypedSupabaseClient,
+  userId: string,
+  sessionId: string,
+  input: EssIntakeInput
+) {
+  const { data: session, error: sessionError } = await supabase
+    .from("intake_sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .eq("patient_id", userId)
+    .maybeSingle();
+
+  if (sessionError) {
+    throw new Error(`Failed to load intake session: ${sessionError.message}`);
+  }
+
+  if (!session) {
+    throw new Error("ไม่พบแบบประเมินนี้ หรือคุณไม่มีสิทธิ์เข้าถึง");
+  }
+
+  await saveStructuredResponses(
+    supabase,
+    sessionId,
+    ESS_DOMAIN,
+    ESS_QUESTION_KEYS,
+    input.answers
+  );
 
   return session;
+}
+
+/** One STOP-BANG letter as the clinician view renders it. */
+export interface StopBangBreakdownItem {
+  letter: string;
+  label: string;
+  scored: boolean;
+  answered: boolean;
+}
+
+/** One ESS item as the clinician view renders it. */
+export interface EssBreakdownItem {
+  field: string;
+  position: number;
+  label: string;
+  score: number | null;
+  answered: boolean;
 }
 
 export interface ClinicianSessionView {
@@ -301,7 +436,22 @@ export interface ClinicianSessionView {
     incomplete: boolean;
     answeredCount: number;
     maxPossibleScore: number;
-    breakdown: { letter: string; label: string; scored: boolean; answered: boolean }[];
+    breakdown: StopBangBreakdownItem[];
+    computedAt: string;
+  } | null;
+  /**
+   * Null when the patient has not submitted the sleepiness questionnaire yet.
+   * Kept as its own field rather than folded in with STOP-BANG: the two
+   * instruments measure different things, are answered at different times, and
+   * a clinician needs to see which one is missing.
+   */
+  ess: {
+    score: number;
+    severity: string | null;
+    incomplete: boolean;
+    answeredCount: number;
+    maxPossibleScore: number;
+    breakdown: EssBreakdownItem[];
     computedAt: string;
   } | null;
   flags: {
@@ -313,12 +463,22 @@ export interface ClinicianSessionView {
   }[];
 }
 
-/** Narrows the jsonb `score_breakdown` column back into the shape we wrote. */
-function readScoreBreakdown(value: unknown) {
+/**
+ * Narrows the jsonb `score_breakdown` column back into the shape we wrote.
+ *
+ * jsonb carries no type information, so the cast is unavoidable; what this
+ * function guarantees is that a missing, malformed or hand-edited value
+ * degrades to an empty breakdown with zeroed counts instead of throwing in the
+ * middle of a clinician's list. The caller decides which item shape it wrote.
+ */
+function readScoreBreakdown<T>(value: unknown): {
+  breakdown: T[];
+  answeredCount: number;
+  incomplete: boolean;
+  maxPossibleScore: number;
+} {
   const empty = {
-    breakdown: [] as ClinicianSessionView["stopBang"] extends null
-      ? never
-      : { letter: string; label: string; scored: boolean; answered: boolean }[],
+    breakdown: [] as T[],
     answeredCount: 0,
     incomplete: false,
     maxPossibleScore: 0,
@@ -329,12 +489,7 @@ function readScoreBreakdown(value: unknown) {
   const obj = value as Record<string, unknown>;
   return {
     breakdown: Array.isArray(obj.breakdown)
-      ? (obj.breakdown as {
-          letter: string;
-          label: string;
-          scored: boolean;
-          answered: boolean;
-        }[])
+      ? (obj.breakdown as T[])
       : empty.breakdown,
     answeredCount:
       typeof obj.answeredCount === "number" ? obj.answeredCount : 0,
@@ -383,7 +538,7 @@ export async function listIntakeSessionsForReview(
       .from("questionnaire_scores")
       .select("session_id, instrument, score, risk_category, score_breakdown, computed_at")
       .in("session_id", sessionIds)
-      .eq("instrument", "STOP_BANG"),
+      .in("instrument", ["STOP_BANG", "ESS"]),
     supabase
       .from("safety_flags")
       .select("id, session_id, flag_type, severity, trigger_source, acknowledged_at")
@@ -393,8 +548,18 @@ export async function listIntakeSessionsForReview(
   const nameById = new Map(
     (profilesResult.data ?? []).map((p) => [p.id, p.full_name])
   );
-  const scoreBySession = new Map(
-    (scoresResult.data ?? []).map((s) => [s.session_id, s])
+  // One row per (session, instrument), so the rows are split by instrument
+  // rather than keyed by session alone — keying by session would have ESS and
+  // STOP-BANG overwrite each other and show whichever arrived last.
+  const stopBangBySession = new Map(
+    (scoresResult.data ?? [])
+      .filter((s) => s.instrument === "STOP_BANG")
+      .map((s) => [s.session_id, s])
+  );
+  const essBySession = new Map(
+    (scoresResult.data ?? [])
+      .filter((s) => s.instrument === "ESS")
+      .map((s) => [s.session_id, s])
   );
 
   const flagsBySession = new Map<string, ClinicianSessionView["flags"]>();
@@ -411,8 +576,15 @@ export async function listIntakeSessionsForReview(
   }
 
   return sessions.map((session) => {
-    const score = scoreBySession.get(session.id);
-    const breakdown = score ? readScoreBreakdown(score.score_breakdown) : null;
+    const score = stopBangBySession.get(session.id);
+    const breakdown = score
+      ? readScoreBreakdown<StopBangBreakdownItem>(score.score_breakdown)
+      : null;
+
+    const essScore = essBySession.get(session.id);
+    const essBreakdown = essScore
+      ? readScoreBreakdown<EssBreakdownItem>(essScore.score_breakdown)
+      : null;
 
     return {
       id: session.id,
@@ -431,6 +603,18 @@ export async function listIntakeSessionsForReview(
               maxPossibleScore: breakdown.maxPossibleScore,
               breakdown: breakdown.breakdown,
               computedAt: score.computed_at,
+            }
+          : null,
+      ess:
+        essScore && essBreakdown
+          ? {
+              score: Number(essScore.score),
+              severity: essScore.risk_category,
+              incomplete: essBreakdown.incomplete,
+              answeredCount: essBreakdown.answeredCount,
+              maxPossibleScore: essBreakdown.maxPossibleScore,
+              breakdown: essBreakdown.breakdown,
+              computedAt: essScore.computed_at,
             }
           : null,
       flags: flagsBySession.get(session.id) ?? [],

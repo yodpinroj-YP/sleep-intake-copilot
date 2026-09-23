@@ -1,10 +1,15 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { EssForm } from "@/components/ess-form";
 import { StopBangForm } from "@/components/stopbang-form";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
-import { getMyIntakeSession, getStopBangAnswers } from "@/services/intake/service";
+import {
+  getEssAnswers,
+  getMyIntakeSession,
+  getStopBangAnswers,
+} from "@/services/intake/service";
 
 /**
  * The patient's questionnaire page for one intake session.
@@ -42,7 +47,12 @@ export default async function IntakePage({
     .eq("id", user.id)
     .single();
 
+  // Two separate queries rather than one clever join: the hand-written
+  // database types declare no relationships, so a nested PostgREST select
+  // silently degrades the inference and hides real mistakes. Two plain reads
+  // cost one extra round trip and stay honest.
   const answers = await getStopBangAnswers(supabase, id);
+  const essAnswers = await getEssAnswers(supabase, id);
 
   const isOpen =
     session.status === "not_started" || session.status === "in_progress";
@@ -62,15 +72,25 @@ export default async function IntakePage({
       </div>
 
       {isOpen ? (
-        <StopBangForm
-          sessionId={session.id}
-          initialHeightCm={session.height_cm}
-          initialWeightKg={session.weight_kg}
-          initialNeckCm={session.neck_circumference_cm}
-          initialDateOfBirth={profile?.date_of_birth ?? null}
-          initialSex={profile?.sex ?? null}
-          initialAnswers={answers}
-        />
+        <>
+          <p className="text-sm text-muted-foreground">
+            แบบสอบถามมี 2 ชุด ชุดแรกคัดกรองภาวะหยุดหายใจขณะหลับ
+            ชุดที่สองประเมินความง่วงกลางวัน แต่ละชุดบันทึกแยกกัน
+            ทำชุดไหนก่อนก็ได้ และกลับมาทำต่อภายหลังได้
+          </p>
+
+          <StopBangForm
+            sessionId={session.id}
+            initialHeightCm={session.height_cm}
+            initialWeightKg={session.weight_kg}
+            initialNeckCm={session.neck_circumference_cm}
+            initialDateOfBirth={profile?.date_of_birth ?? null}
+            initialSex={profile?.sex ?? null}
+            initialAnswers={answers}
+          />
+
+          <EssForm sessionId={session.id} initialAnswers={essAnswers} />
+        </>
       ) : (
         <p className="text-sm text-muted-foreground">
           เซสชันนี้ปิดรับคำตอบแล้ว ไม่สามารถแก้ไขได้

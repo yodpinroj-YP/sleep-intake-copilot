@@ -1,14 +1,28 @@
 import "server-only";
 
+import { ESS_QUESTION_KEYS } from "@/lib/ess";
 import { STOPBANG_QUESTION_KEYS } from "@/lib/stopbang";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import {
+  detectEssSafetyFlags,
+  ESS_FIELDS,
+  ESS_FLAG_TYPES,
+  parseItemScore,
+  scoreEss,
+} from "./ess-scoring.ts";
+import type { EssField, EssInput, EssResult } from "./ess-scoring.ts";
+import {
   calculateAgeYears,
   detectSafetyFlags,
   scoreStopBang,
+  STOPBANG_FLAG_TYPES,
 } from "./stopbang-scoring.ts";
-import type { StopBangInput, StopBangResult } from "./stopbang-scoring.ts";
+import type {
+  SafetyFlagCandidate,
+  StopBangInput,
+  StopBangResult,
+} from "./stopbang-scoring.ts";
 
 /**
  * Computes a STOP-BANG score for one session and writes it to
@@ -80,16 +94,37 @@ type AdminClient = ReturnType<typeof createAdminClient>;
  * part of the record of what they saw and acted on. Deleting it because the
  * patient later edited an answer would quietly erase that. An acknowledged
  * flag therefore stays, even if the score has since dropped.
+ *
+ * SCOPED TO ONE INSTRUMENT. `ownedFlagTypes` is the set of flags the calling
+ * engine is responsible for, and nothing outside that set is ever inspected or
+ * deleted. This is not a detail: a session can carry flags from STOP-BANG and
+ * from ESS at the same time, and an unscoped "withdraw whatever this result no
+ * longer justifies" would have each questionnaire delete the other's flags
+ * every time a patient re-submitted — losing, among other things, the urgent
+ * drowsy-driving flag, with nothing in the logs to show it had ever existed.
  */
 async function syncSafetyFlags(
   admin: AdminClient,
   sessionId: string,
-  result: StopBangResult
+  candidates: SafetyFlagCandidate[],
+  ownedFlagTypes: readonly string[]
 ): Promise<string[]> {
-  const candidates = detectSafetyFlags(result);
+  const owned = new Set<string>(ownedFlagTypes);
+
+  // A candidate outside the owned set could be raised but never withdrawn,
+  // so treat it as the programming error it is rather than persisting it.
+  for (const candidate of candidates) {
+    if (!owned.has(candidate.flagType)) {
+      throw new Error(
+        `Flag "${candidate.flagType}" was raised by an engine that does not own it. ` +
+          `Add it to that engine's flag-type list.`
+      );
+    }
+  }
+
   const candidateTypes = new Set(candidates.map((c) => c.flagType));
 
-  const { data: existing, error: readError } = await admin
+  const { data: allExisting, error: readError } = await admin
     .from("safety_flags")
     .select("id, flag_type, acknowledged_at")
     .eq("session_id", sessionId);
@@ -98,8 +133,11 @@ async function syncSafetyFlags(
     throw new Error(`Failed to read safety flags: ${readError.message}`);
   }
 
+  // Everything below works only on this instrument's own flags.
+  const existing = (allExisting ?? []).filter((row) => owned.has(row.flag_type));
+
   const existingByType = new Map(
-    (existing ?? []).map((row) => [row.flag_type, row])
+    existing.map((row) => [row.flag_type, row])
   );
 
   // Raise any flag that should be there and isn't.
@@ -121,7 +159,7 @@ async function syncSafetyFlags(
 
   // Withdraw auto-raised flags whose rule no longer fires, unless a clinician
   // has already acknowledged them.
-  const toWithdraw = (existing ?? []).filter(
+  const toWithdraw = existing.filter(
     (row) => !candidateTypes.has(row.flag_type) && row.acknowledged_at === null
   );
 
@@ -141,7 +179,7 @@ async function syncSafetyFlags(
 
   const withdrawnIds = new Set(toWithdraw.map((row) => row.id));
   return [
-    ...(existing ?? [])
+    ...existing
       .filter((row) => !withdrawnIds.has(row.id))
       .map((row) => row.flag_type),
     ...toInsert.map((row) => row.flag_type),
@@ -242,7 +280,157 @@ export async function scoreAndSaveStopBangSession(
 
   // --- Raise or withdraw safety flags based on the new score -------------
 
-  const activeFlagTypes = await syncSafetyFlags(admin, sessionId, result);
+  const activeFlagTypes = await syncSafetyFlags(
+    admin,
+    sessionId,
+    detectSafetyFlags(result),
+    STOPBANG_FLAG_TYPES
+  );
+
+  return { result, input, activeFlagTypes };
+}
+
+// ---------------------------------------------------------------------------
+// Epworth Sleepiness Scale
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps each stored question key to the field the scoring engine expects.
+ *
+ * The map lives here rather than in lib/ess.ts or ess-scoring.ts because it is
+ * the only place that legitimately knows both sides: the wording file owns the
+ * keys the database stores, and the scoring file is kept free of imports so it
+ * stays testable. Anything missing from this map throws at scoring time rather
+ * than quietly producing a lower score — see buildEssInput.
+ */
+const ESS_KEY_TO_FIELD: Record<string, EssField> = {
+  ess_sitting_reading: "sittingReading",
+  ess_watching_tv: "watchingTv",
+  ess_sitting_public: "sittingPublic",
+  ess_passenger_car: "passengerCar",
+  ess_lying_afternoon: "lyingAfternoon",
+  ess_sitting_talking: "sittingTalking",
+  ess_after_lunch: "afterLunch",
+  ess_in_car_traffic: "inCarTraffic",
+};
+
+function buildEssInput(answers: Map<string, unknown>): EssInput {
+  const input = Object.fromEntries(
+    ESS_FIELDS.map((field) => [field, null])
+  ) as unknown as EssInput;
+
+  for (const key of ESS_QUESTION_KEYS) {
+    const field = ESS_KEY_TO_FIELD[key];
+
+    if (!field) {
+      // A question was added to lib/ess.ts without a scoring field. Failing
+      // loudly is the point: silently skipping it would understate the score
+      // of a patient who answered it.
+      throw new Error(
+        `ESS question "${key}" has no scoring field. Add it to ESS_KEY_TO_FIELD.`
+      );
+    }
+
+    input[field] = parseItemScore(answers.get(key));
+  }
+
+  return input;
+}
+
+export interface ScoreEssOutcome {
+  result: EssResult;
+  /** Exactly what was fed to the scoring function — stored for auditability. */
+  input: EssInput;
+  /** ESS flag types raised (or still standing) for this session after scoring. */
+  activeFlagTypes: string[];
+}
+
+/**
+ * Computes an ESS score for one session and writes it to
+ * `questionnaire_scores`.
+ *
+ * Everything said about authorization in scoreAndSaveStopBangSession applies
+ * here unchanged: this uses the service-role client, which bypasses RLS, so it
+ * must only be called from a route that has already proved — through the
+ * patient's own client — that the caller owns the session.
+ *
+ * The two instruments write separate rows, keyed by the `unique (session_id,
+ * instrument)` constraint, and reconcile separate sets of safety flags. A
+ * patient can therefore hold a standard OSA-risk flag and an urgent
+ * drowsy-driving flag at the same time, and re-submitting either questionnaire
+ * leaves the other's flags untouched.
+ */
+export async function scoreAndSaveEssSession(
+  sessionId: string
+): Promise<ScoreEssOutcome> {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new MissingServiceRoleKeyError();
+  }
+
+  const admin = createAdminClient();
+
+  const { data: session, error: sessionError } = await admin
+    .from("intake_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .single();
+
+  if (sessionError || !session) {
+    throw new Error(
+      `Cannot score: intake session not found (${sessionError?.message ?? "no row"})`
+    );
+  }
+
+  const { data: responses, error: responsesError } = await admin
+    .from("intake_responses")
+    .select("question_key, answer_value")
+    .eq("session_id", sessionId)
+    .in("question_key", ESS_QUESTION_KEYS);
+
+  if (responsesError) {
+    throw new Error(`Cannot score: ${responsesError.message}`);
+  }
+
+  const answers = new Map<string, unknown>(
+    (responses ?? []).map((row) => [row.question_key, row.answer_value])
+  );
+
+  const input = buildEssInput(answers);
+  const result = scoreEss(input);
+
+  // `risk_category` holds each instrument's own vocabulary: 'low' /
+  // 'intermediate' / 'high' for STOP-BANG, 'normal' / 'mild' / 'moderate' /
+  // 'severe' for ESS. The column is free text precisely so neither instrument
+  // has to be squeezed into the other's bands, which would misreport both.
+  const { error: saveError } = await admin.from("questionnaire_scores").upsert(
+    {
+      session_id: sessionId,
+      instrument: "ESS",
+      raw_answers: input,
+      score: result.score,
+      score_breakdown: {
+        breakdown: result.breakdown,
+        answeredCount: result.answeredCount,
+        incomplete: result.incomplete,
+        maxPossibleScore: result.maxPossibleScore,
+      },
+      risk_category: result.severity,
+      computed_by: "deterministic_engine",
+      computed_at: new Date().toISOString(),
+    },
+    { onConflict: "session_id,instrument" }
+  );
+
+  if (saveError) {
+    throw new Error(`Failed to save score: ${saveError.message}`);
+  }
+
+  const activeFlagTypes = await syncSafetyFlags(
+    admin,
+    sessionId,
+    detectEssSafetyFlags(result),
+    ESS_FLAG_TYPES
+  );
 
   return { result, input, activeFlagTypes };
 }

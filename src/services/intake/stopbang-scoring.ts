@@ -198,6 +198,17 @@ export function categoriseRisk(score: number): RiskCategory {
 /** Stable identifier for the high-OSA-risk flag. Never translate or reuse. */
 export const HIGH_OSA_RISK_FLAG = "high_osa_risk";
 
+/**
+ * Every flag type the STOP-BANG engine owns.
+ *
+ * This list exists so the persistence layer can reconcile STOP-BANG flags
+ * without touching flags another instrument raised. Before ESS was added there
+ * was only one instrument, so "withdraw any flag this result no longer
+ * justifies" was safe; with two, an unscoped reconcile would have each
+ * questionnaire silently delete the other's flags on every re-submission.
+ */
+export const STOPBANG_FLAG_TYPES = [HIGH_OSA_RISK_FLAG] as const;
+
 export interface SafetyFlagCandidate {
   flagType: string;
   severity: "standard" | "urgent";

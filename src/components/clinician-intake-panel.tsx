@@ -10,12 +10,21 @@ import type { ClinicianSessionView } from "@/services/intake/service";
 
 const FLAG_LABELS: Record<string, string> = {
   high_osa_risk: "เสี่ยง OSA สูง — ควรพิจารณาส่งตรวจ sleep study",
+  severe_sleepiness: "ง่วงกลางวันระดับรุนแรง",
+  drowsy_driving: "เสี่ยงหลับขณะขับรถ — ควรติดต่อผู้ป่วยและแนะนำเรื่องการขับขี่",
 };
 
 const RISK_LABELS: Record<string, string> = {
   low: "เสี่ยงต่ำ",
   intermediate: "เสี่ยงปานกลาง",
   high: "เสี่ยงสูง",
+};
+
+const ESS_SEVERITY_LABELS: Record<string, string> = {
+  normal: "ง่วงปกติ",
+  mild: "ง่วงเล็กน้อย",
+  moderate: "ง่วงปานกลาง",
+  severe: "ง่วงรุนแรง",
 };
 
 /**
@@ -57,6 +66,57 @@ function ScoreBreakdown({
 }
 
 /**
+ * Compact ESS breakdown: the eight items, each showing the score it was given.
+ *
+ * Shows the number rather than a filled/empty mark, because unlike STOP-BANG
+ * an ESS item is not a yes/no — a row of 3s and a row of 1s can reach similar
+ * totals by very different routes, and which situations the patient dozes in
+ * is clinically informative on its own.
+ *
+ * The darker the cell, the higher the answer; a dashed outline means the item
+ * was never answered, which is not the same as a 0 and must not look like one.
+ */
+function EssBreakdown({
+  items,
+}: {
+  items: {
+    field: string;
+    position: number;
+    label: string;
+    score: number | null;
+    answered: boolean;
+  }[];
+}) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((item) => {
+        const style = !item.answered
+          ? "bg-background text-muted-foreground/50 border-dashed border-muted-foreground/40"
+          : item.score === 0
+            ? "bg-background text-muted-foreground border-input"
+            : item.score === 1
+              ? "bg-foreground/20 text-foreground border-foreground/30"
+              : item.score === 2
+                ? "bg-foreground/50 text-background border-foreground/60"
+                : "bg-foreground text-background border-foreground";
+
+        return (
+          <span
+            key={item.field}
+            title={`${item.position}. ${item.label} — ${
+              item.answered ? `${item.score} คะแนน` : "ไม่ได้ตอบ"
+            }`}
+            className={`inline-flex h-6 w-6 items-center justify-center rounded border text-[11px] font-semibold tabular-nums ${style}`}
+          >
+            {item.answered ? item.score : "–"}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * The clinician's working list of patient intakes.
  *
  * Read-only on purpose. Acknowledging a flag and approving an AI summary are
@@ -74,8 +134,8 @@ export function ClinicianIntakePanel({
       <CardHeader>
         <CardTitle>Patient intakes</CardTitle>
         <CardDescription>
-          แบบคัดกรองที่ผู้ป่วยส่งเข้ามา พร้อมคะแนน STOP-BANG ที่คำนวณด้วยกฎตายตัว
-          และสัญญาณเตือนที่ระบบตรวจพบ
+          แบบคัดกรองที่ผู้ป่วยส่งเข้ามา พร้อมคะแนน STOP-BANG และ ESS
+          ที่คำนวณด้วยกฎตายตัว และสัญญาณเตือนที่ระบบตรวจพบ
         </CardDescription>
       </CardHeader>
 
@@ -88,15 +148,34 @@ export function ClinicianIntakePanel({
 
         {sessions.map((session) => {
           const risk = session.stopBang?.riskCategory ?? null;
+          const essSeverity = session.ess?.severity ?? null;
           const openFlags = session.flags.filter((f) => !f.acknowledgedAt);
+
+          // An unacknowledged urgent flag gets a stronger treatment than a
+          // standard one. Before ESS every flag was 'standard', so one shade of
+          // red was enough; now that a case can mean "contact this patient
+          // about driving", a queue where everything looks equally alarming
+          // would hide exactly the case that cannot wait.
+          const hasOpenUrgent = openFlags.some((f) => f.severity === "urgent");
+
+          // Urgent first, then unacknowledged, so the top of each card is the
+          // thing most likely to need action.
+          const sortedFlags = [...session.flags].sort((a, b) => {
+            const urgency =
+              Number(b.severity === "urgent") - Number(a.severity === "urgent");
+            if (urgency !== 0) return urgency;
+            return Number(!!a.acknowledgedAt) - Number(!!b.acknowledgedAt);
+          });
 
           return (
             <Card
               key={session.id}
               className={
-                openFlags.length > 0
-                  ? "border-destructive/50 bg-destructive/5"
-                  : "bg-muted/30"
+                hasOpenUrgent
+                  ? "border-destructive bg-destructive/10"
+                  : openFlags.length > 0
+                    ? "border-destructive/50 bg-destructive/5"
+                    : "bg-muted/30"
               }
             >
               <CardHeader className="pb-3">
@@ -123,6 +202,15 @@ export function ClinicianIntakePanel({
                         }
                       >
                         {RISK_LABELS[risk] ?? risk}
+                      </Badge>
+                    )}
+                    {essSeverity && essSeverity !== "normal" && (
+                      <Badge
+                        variant={
+                          essSeverity === "severe" ? "destructive" : "secondary"
+                        }
+                      >
+                        {ESS_SEVERITY_LABELS[essSeverity] ?? essSeverity}
                       </Badge>
                     )}
                     <Badge variant="outline">
@@ -160,13 +248,38 @@ export function ClinicianIntakePanel({
                   </div>
                 ) : (
                   <p className="text-muted-foreground">
-                    ยังไม่ได้คำนวณคะแนน — ผู้ป่วยอาจยังตอบแบบสอบถามไม่เสร็จ
+                    ยังไม่ได้คำนวณคะแนน STOP-BANG — ผู้ป่วยอาจยังตอบไม่เสร็จ
+                  </p>
+                )}
+
+                {session.ess ? (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="font-medium tabular-nums">
+                        ESS {session.ess.score} / 24
+                      </span>
+                      {session.ess.incomplete && (
+                        <span className="text-xs text-muted-foreground">
+                          ตอบ {session.ess.answeredCount} จาก 8 ข้อ —
+                          คะแนนนี้เป็นค่าต่ำสุด อาจสูงได้ถึง{" "}
+                          <strong className="tabular-nums">
+                            {session.ess.maxPossibleScore}
+                          </strong>{" "}
+                          เมื่อตอบครบ
+                        </span>
+                      )}
+                    </div>
+                    <EssBreakdown items={session.ess.breakdown} />
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">
+                    ยังไม่ได้คำนวณคะแนน ESS — ผู้ป่วยยังไม่ได้ทำแบบประเมินความง่วง
                   </p>
                 )}
 
                 {session.flags.length > 0 && (
                   <div className="flex flex-col gap-1.5 border-t pt-3">
-                    {session.flags.map((flag) => (
+                    {sortedFlags.map((flag) => (
                       <div key={flag.id} className="flex flex-col gap-0.5">
                         <div className="flex flex-wrap items-center gap-2">
                           <Badge

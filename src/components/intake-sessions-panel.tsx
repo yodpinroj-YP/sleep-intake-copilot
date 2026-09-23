@@ -175,8 +175,17 @@ export function IntakeSessionsPanel({ initialSessions }: { initialSessions: Inta
                     ) : (
                       <>
                         <Button size="sm" asChild>
+                          {/*
+                            Named for the page, not for one questionnaire on
+                            it. This used to read "ทำแบบสอบถาม STOP-BANG",
+                            which became a lie the moment ESS was added to the
+                            same page — a patient reading it would have no
+                            reason to believe the sleepiness questionnaire was
+                            behind this button, and would never scroll to find
+                            it.
+                          */}
                           <Link href={`/intake/${session.id}`}>
-                            ทำแบบสอบถาม STOP-BANG
+                            ทำแบบสอบถาม
                           </Link>
                         </Button>
                         <Button
