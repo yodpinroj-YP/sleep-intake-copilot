@@ -210,6 +210,7 @@ export interface Database {
           missing_information: unknown;
           needs_verification: unknown;
           model: string;
+          prompt_version: string | null;
           status: ReviewStatus;
           reviewed_by: string | null;
           reviewed_at: string | null;
@@ -226,6 +227,7 @@ export interface Database {
           missing_information?: unknown;
           needs_verification?: unknown;
           model: string;
+          prompt_version?: string | null;
           status?: ReviewStatus;
           reviewed_by?: string | null;
           reviewed_at?: string | null;
@@ -242,6 +244,7 @@ export interface Database {
           missing_information?: unknown;
           needs_verification?: unknown;
           model?: string;
+          prompt_version?: string | null;
           status?: ReviewStatus;
           reviewed_by?: string | null;
           reviewed_at?: string | null;

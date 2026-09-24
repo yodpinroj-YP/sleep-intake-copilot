@@ -1,3 +1,4 @@
+import { GenerateSummaryButton } from "@/components/generate-summary-button";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -126,8 +127,16 @@ function EssBreakdown({
  */
 export function ClinicianIntakePanel({
   sessions,
+  allowActions = true,
 }: {
   sessions: ClinicianSessionView[];
+  /**
+   * False on the public demo page, where the sessions are fabricated and no
+   * request could succeed anyway. Rendering a button that always fails would
+   * teach a visitor that the system is broken, which is the opposite of what
+   * a demo is for.
+   */
+  allowActions?: boolean;
 }) {
   return (
     <Card>
@@ -305,6 +314,12 @@ export function ClinicianIntakePanel({
                         </p>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {allowActions && (
+                  <div className="border-t pt-3">
+                    <GenerateSummaryButton sessionId={session.id} />
                   </div>
                 )}
               </CardContent>

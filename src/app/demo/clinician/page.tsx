@@ -269,7 +269,7 @@ export default function ClinicianDemoPage() {
         </p>
       </div>
 
-      <ClinicianIntakePanel sessions={DEMO_SESSIONS} />
+      <ClinicianIntakePanel sessions={DEMO_SESSIONS} allowActions={false} />
 
       <div className="rounded-lg border bg-muted/30 p-4 text-sm">
         <p className="font-medium">สี่เคสนี้เลือกมาเพื่อแสดงอะไร</p>
