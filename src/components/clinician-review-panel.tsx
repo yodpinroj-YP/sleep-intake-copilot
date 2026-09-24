@@ -90,8 +90,20 @@ function Section({
  */
 export function ClinicianReviewPanel({
   initialSummaries,
+  readOnly = false,
 }: {
   initialSummaries: ClinicianSummary[];
+  /**
+   * True on the public demo page. The same component renders there, with
+   * fabricated data and without the approve/reject controls — a visitor has no
+   * account, so those buttons could only ever fail, and a demo that shows
+   * something failing teaches the wrong thing.
+   *
+   * Sharing the component rather than writing a second one for the demo is
+   * deliberate: what a visitor sees is then literally the clinician's screen,
+   * not a mock-up of it that can drift out of date.
+   */
+  readOnly?: boolean;
 }) {
   /**
    * Which summaries this clinician has just acted on.
@@ -147,7 +159,7 @@ export function ClinicianReviewPanel({
       <CardContent className="flex flex-col gap-3">
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        {summaries.length === 0 && (
+        {summaries.length === 0 && !readOnly && (
           <p className="text-sm text-muted-foreground">
             ยังไม่มีร่างที่รอการตรวจสอบ — กด &ldquo;ให้ AI ร่างสรุป&rdquo;
             ที่เคสด้านบนเพื่อสร้าง
@@ -196,24 +208,33 @@ export function ClinicianReviewPanel({
               </CardContent>
 
               <CardFooter className="flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  disabled={isPending}
-                  onClick={() => handleReview(summary.id, "approved")}
-                >
-                  อนุมัติ
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={isPending}
-                  onClick={() => handleReview(summary.id, "rejected")}
-                >
-                  ปฏิเสธ
-                </Button>
-                <span className="text-xs text-muted-foreground">
-                  การตัดสินใจนี้ถูกบันทึกพร้อมชื่อผู้ตรวจและเวลา
-                </span>
+                {readOnly ? (
+                  <span className="text-xs text-muted-foreground">
+                    ในระบบจริง แพทย์จะเห็นปุ่มอนุมัติและปฏิเสธตรงนี้
+                    และการตัดสินใจจะถูกบันทึกพร้อมชื่อผู้ตรวจและเวลา
+                  </span>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      disabled={isPending}
+                      onClick={() => handleReview(summary.id, "approved")}
+                    >
+                      อนุมัติ
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={isPending}
+                      onClick={() => handleReview(summary.id, "rejected")}
+                    >
+                      ปฏิเสธ
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      การตัดสินใจนี้ถูกบันทึกพร้อมชื่อผู้ตรวจและเวลา
+                    </span>
+                  </>
+                )}
               </CardFooter>
             </Card>
           );

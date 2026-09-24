@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { ClinicianIntakePanel } from "@/components/clinician-intake-panel";
+import { ClinicianReviewPanel } from "@/components/clinician-review-panel";
 import { Button } from "@/components/ui/button";
 import type { ClinicianSessionView } from "@/services/intake/service";
 
@@ -235,6 +236,59 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
   },
 ];
 
+/**
+ * A fabricated AI draft for the fourth case.
+ *
+ * WHY THIS IS HERE
+ *
+ * The AI feature is the part a visitor most wants to see and the part they
+ * cannot reach: drafting is a clinician action, and signing up creates a
+ * patient. A feature that only its author can demonstrate may as well not
+ * exist during an evaluation.
+ *
+ * The text below is a real draft the system produced for this case, kept
+ * verbatim rather than polished by hand — including the fact that it says
+ * what it cannot conclude. Rewriting it to sound more impressive would make
+ * this page a claim about the system instead of a sample of it.
+ */
+const DEMO_SUMMARIES = [
+  {
+    id: "demo-summary-1",
+    session_id: "demo-4-a7f31c09",
+    version: 1,
+    summary_text:
+      "ผู้ป่วยหญิง อายุ 30-39 ปี BMI 21.3 อาการหลักคือหลับยาก ใช้เวลานานกว่าจะหลับ " +
+      "คะแนน STOP-BANG 1 จาก 8 อยู่ในเกณฑ์เสี่ยงต่ำต่อภาวะหยุดหายใจขณะหลับ และคะแนน ESS รวม 9 จาก 24 " +
+      "อยู่ในเกณฑ์ปกติ ทั้งสองแบบประเมินตอบครบทุกข้อ " +
+      "อย่างไรก็ตาม ผู้ป่วยตอบข้อที่เกี่ยวกับโอกาสงีบหลับขณะอยู่ในรถที่หยุดนิ่งระหว่างการจราจรไว้ที่ระดับสูงสุด " +
+      "ซึ่งระบบได้ตั้งสัญญาณเตือนระดับด่วนไว้ โดยไม่ขึ้นกับคะแนนรวมที่อยู่ในเกณฑ์ปกติ " +
+      "ข้อมูลที่มีจึงชี้ไปที่ปัญหาการเริ่มต้นการนอนหลับเป็นหลัก ร่วมกับประเด็นความปลอดภัยขณะขับขี่ที่ควรสอบถามเพิ่มเติม",
+    key_symptoms: [
+      "หลับยาก ใช้เวลานานกว่าจะหลับ (อาการหลักที่ผู้ป่วยระบุเอง)",
+      "ตอบระดับสูงสุดในข้อโอกาสงีบหลับขณะรถหยุดนิ่งระหว่างการจราจร",
+    ],
+    important_negatives: [
+      "ไม่มีเสียงกรนดัง ไม่มีผู้สังเกตเห็นการหยุดหายใจ",
+      "BMI 21.3 และรอบคอไม่เข้าเกณฑ์เสี่ยง",
+      "คะแนนความง่วงกลางวันโดยรวมอยู่ในเกณฑ์ปกติ",
+    ],
+    missing_information: [
+      "ระยะเวลาที่มีอาการหลับยาก และความถี่ต่อสัปดาห์",
+      "เวลาเข้านอนและตื่นนอนในวันทำงานเทียบกับวันหยุด",
+      "การใช้คาเฟอีน แอลกอฮอล์ และยาที่อาจรบกวนการนอน",
+      "ยังไม่มีแบบประเมินภาวะนอนไม่หลับ (ISI) ในระบบ",
+    ],
+    needs_verification: [
+      "ยืนยันกับผู้ป่วยโดยตรงว่าเป็นผู้ขับขี่เองหรือไม่ และเคยมีเหตุการณ์เกือบหลับขณะขับรถหรือไม่",
+      "คะแนนรวมที่อยู่ในเกณฑ์ปกติไม่ได้ตัดความเสี่ยงขณะขับขี่ออก ควรประเมินเรื่องนี้แยกต่างหาก",
+    ],
+    model: "gemini-3.5-flash",
+    prompt_version: "summary-v1",
+    status: "pending_review" as const,
+    created_at: "2026-09-21T19:22:00.000Z",
+  },
+];
+
 export const metadata = {
   title: "ตัวอย่างหน้าจอแพทย์ — Sleep Intake Copilot",
   description:
@@ -270,6 +324,24 @@ export default function ClinicianDemoPage() {
       </div>
 
       <ClinicianIntakePanel sessions={DEMO_SESSIONS} allowActions={false} />
+
+      <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+        <p className="font-medium">ส่วนของ AI อยู่ตรงไหนในระบบนี้</p>
+        <p className="mt-2 text-muted-foreground">
+          คะแนนและสัญญาณเตือนทั้งหมดด้านบนคำนวณด้วยกฎตายตัวที่มีชุดทดสอบกำกับ
+          ไม่มี AI เกี่ยวข้องเลยแม้แต่ขั้นตอนเดียว
+          AI เข้ามาทำงานหลังจากนั้น โดยรับตัวเลขเหล่านี้ไปเป็นข้อเท็จจริง
+          แล้วเรียบเรียงให้แพทย์อ่านได้เร็วขึ้น — หากมันผิด มันผิดที่สำนวน ไม่ผิดที่ตัวเลข
+        </p>
+        <p className="mt-2 text-muted-foreground">
+          สิ่งที่ส่งออกไปให้ AI คือช่วงอายุ เพศ ค่าวัด และคะแนนเท่านั้น
+          ไม่มีชื่อ ไม่มีเลขประจำตัวผู้ป่วย ไม่มีวันเกิด
+          และไม่มีข้อความอิสระที่ผู้ป่วยพิมพ์เอง — ระบบมีด่านตรวจที่จะปฏิเสธไม่ส่ง
+          หากตรวจพบข้อมูลระบุตัวตนหลุดเข้าไป
+        </p>
+      </div>
+
+      <ClinicianReviewPanel initialSummaries={DEMO_SUMMARIES} readOnly />
 
       <div className="rounded-lg border bg-muted/30 p-4 text-sm">
         <p className="font-medium">สี่เคสนี้เลือกมาเพื่อแสดงอะไร</p>
