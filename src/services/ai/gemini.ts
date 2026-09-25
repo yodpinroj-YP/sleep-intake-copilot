@@ -50,19 +50,32 @@ const DEFAULT_MODEL = "gemini-3.5-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 /**
- * Hard ceiling on one request.
+ * Time budgets.
  *
- * This started at 20 seconds, which was wrong: the current generation of
- * "flash" models spends time reasoning before it emits anything, and a real
- * summary prompt is far longer than a test one. The first live attempt was
- * cancelled by this timer rather than by anything the provider did.
+ * THE MISTAKE THIS REPLACES, BECAUSE IT IS AN EASY ONE TO MAKE AGAIN
  *
- * 60 seconds is chosen to match the ceiling the hosting platform allows a
- * server function to run for — a timeout shorter than the platform's gives a
- * clear error message, while one longer than it would let the platform kill
- * the request first and leave the user staring at a blank failure.
+ * The first version set a 60-second ceiling on ONE call, to match the 60
+ * seconds the hosting platform allows a server function to run for. That
+ * looked right and was wrong: this function can make up to three calls — the
+ * first attempt, one retry, then the fallback model — so the real worst case
+ * was three minutes against a sixty-second limit. When the primary model was
+ * busy and hung, the platform killed the request before any of our own error
+ * handling ran, and the browser got a bare 504 with no message in it.
+ *
+ * What has to fit inside the platform's limit is the TOTAL, not one attempt.
+ * So a single deadline is set once, every attempt draws from what is left of
+ * it, and an attempt that cannot fit is skipped rather than started.
+ *
+ * TOTAL_BUDGET_MS sits well under the platform ceiling to leave room for
+ * reading the database, parsing the reply and writing the row afterwards.
  */
-const REQUEST_TIMEOUT_MS = 60_000;
+const TOTAL_BUDGET_MS = 42_000;
+
+/** No single attempt may hold the whole budget; a hung call must not starve the rest. */
+const ATTEMPT_TIMEOUT_MS = 15_000;
+
+/** Below this much remaining, starting another attempt only wastes the wait. */
+const MIN_ATTEMPT_MS = 4_000;
 
 export class MissingAiKeyError extends Error {
   constructor() {
@@ -179,10 +192,11 @@ function extractUsage(payload: unknown): {
 async function callOnce(
   model: string,
   apiKey: string,
-  options: GenerateTextOptions
+  options: GenerateTextOptions,
+  timeoutMs: number
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     return await fetch(`${API_BASE}/${model}:generateContent`, {
@@ -234,26 +248,43 @@ export async function generateText(
   const candidates =
     fallback && fallback !== primary ? [primary, fallback] : [primary];
 
+  // One deadline for everything this function does, set before the first call.
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
+  const remaining = () => deadline - Date.now();
+
+  /** Runs one attempt inside whatever is left of the budget. */
+  const attempt = (name: string) =>
+    callOnce(name, apiKey, options, Math.min(ATTEMPT_TIMEOUT_MS, remaining()));
+
   let model = primary;
   let response: Response;
 
   try {
-    response = await callOnce(model, apiKey, options);
+    response = await attempt(model);
 
-    if (!response.ok && isTransient(response.status)) {
+    // One quick retry on the same model — a transient refusal often clears.
+    if (
+      !response.ok &&
+      isTransient(response.status) &&
+      remaining() > MIN_ATTEMPT_MS + 1_000
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
-      response = await callOnce(model, apiKey, options);
+      response = await attempt(model);
     }
 
-    // Still refusing after a retry — try the next model rather than give up.
+    // Still refusing — try the next model rather than give up, but only while
+    // there is enough time left for the attempt to finish. Starting a call
+    // that the platform will kill mid-flight produces no answer AND no error
+    // message, which is the worst of both.
     for (const next of candidates.slice(1)) {
       if (response.ok || !isTransient(response.status)) break;
+      if (remaining() < MIN_ATTEMPT_MS) break;
 
       console.warn(
         `[ai] ${model} ตอบ ${response.status} — กำลังลองรุ่นสำรอง ${next}`
       );
       model = next;
-      response = await callOnce(model, apiKey, options);
+      response = await attempt(model);
     }
   } catch (err) {
     // AbortError on timeout, or a network failure. Neither carries anything
@@ -262,7 +293,7 @@ export async function generateText(
 
     throw new AiRequestError(
       aborted
-        ? `บริการ AI ใช้เวลานานเกิน ${REQUEST_TIMEOUT_MS / 1000} วินาที จึงยกเลิกคำขอ — ลองใหม่อีกครั้ง`
+        ? `บริการ AI ใช้เวลานานเกิน ${TOTAL_BUDGET_MS / 1000} วินาที จึงยกเลิกคำขอ — ลองใหม่อีกครั้ง`
         : `ไม่สามารถติดต่อบริการ AI ได้: ${
             err instanceof Error ? err.message : "unknown error"
           }`

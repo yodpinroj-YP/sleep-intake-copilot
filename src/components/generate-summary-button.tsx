@@ -38,7 +38,18 @@ export function GenerateSummaryButton({ sessionId }: { sessionId: string }) {
       const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setError(json.error ?? "สร้างร่างสรุปไม่สำเร็จ");
+        // A reply with no JSON body did not come from this application — the
+        // platform cut the request off before the route could answer. Saying
+        // only "failed" sends whoever sees it looking in the wrong place, so
+        // name the two cases apart and keep the status code, which is the
+        // first thing anyone reading the logs will search for.
+        const message =
+          json.error ??
+          (res.status === 504
+            ? "เซิร์ฟเวอร์ใช้เวลานานเกินกำหนดและยกเลิกคำขอ (504) — ลองใหม่อีกครั้ง"
+            : `สร้างร่างสรุปไม่สำเร็จ (สถานะ ${res.status})`);
+
+        setError(message);
         return;
       }
 
