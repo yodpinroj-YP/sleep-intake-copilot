@@ -50,6 +50,19 @@ const DEFAULT_MODEL = "gemini-3.5-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 /**
+ * Models to try after the first two, in order.
+ *
+ * One fallback turned out not to be enough: on a busy afternoon the primary
+ * and its fallback both answered 503 within seconds of each other. Spreading
+ * the attempts across generations and sizes makes it far less likely that a
+ * single provider-side spike takes all of them out at once.
+ *
+ * Order matters — better model first, so a lighter one is used only when the
+ * better ones are unavailable, never as the default.
+ */
+const EXTRA_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-flash-latest"];
+
+/**
  * Time budgets.
  *
  * THE MISTAKE THIS REPLACES, BECAUSE IT IS AN EASY ONE TO MAKE AGAIN
@@ -128,12 +141,30 @@ export interface GenerateTextResult {
   outputTokens: number | null;
 }
 
-/** Which failures are worth one more attempt. */
-function isTransient(status: number): boolean {
-  // 429 = rate limited, 5xx = the provider's problem, not ours. A free tier
-  // hits 429 exactly when several people demo at once, which is the worst
-  // possible moment for it to be fatal.
-  return status === 429 || status >= 500;
+/** Which failures are worth trying another model for. */
+function shouldTryAnotherModel(status: number): boolean {
+  // 429 = rate limited and 5xx = the provider's problem, not ours; a free tier
+  // hits both exactly when several people demo at once, which is the worst
+  // possible moment for either to be fatal.
+  //
+  // 404 is included for a different reason: it means this account cannot use
+  // that model at all — a name the provider has retired or closed to new
+  // users, which has already happened twice here. Retrying it is pointless,
+  // but the next model in the chain may well work, so the chain continues
+  // rather than stopping.
+  return status === 404 || status === 429 || status >= 500;
+}
+
+/** A message a clinician can act on, instead of the provider's raw JSON. */
+function describeFailure(status: number, body: string): string {
+  if (status === 503 || status === 429) {
+    return "ขณะนี้บริการ AI มีผู้ใช้งานหนาแน่นทุกรุ่นที่ระบบมี กรุณารอสักครู่แล้วกดใหม่อีกครั้ง — คะแนนและสัญญาณเตือนทั้งหมดคำนวณเสร็จแล้วและไม่ได้รับผลกระทบ";
+  }
+
+  // Anything else is a developer's problem, so it keeps the detail. The body
+  // is truncated: a provider error can be long and occasionally echoes the
+  // request back.
+  return `บริการ AI ตอบกลับด้วยสถานะ ${status}: ${body.slice(0, 200)}`;
 }
 
 function extractText(payload: unknown): string {
@@ -245,8 +276,10 @@ export async function generateText(
   // Falling back to a less fashionable model produces a slightly different
   // summary, which is a far better outcome than producing none.
   const fallback = process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
-  const candidates =
-    fallback && fallback !== primary ? [primary, fallback] : [primary];
+
+  // Deduplicated, so an env override that repeats a default doesn't spend an
+  // attempt asking the same busy model twice.
+  const candidates = [...new Set([primary, fallback, ...EXTRA_FALLBACK_MODELS])];
 
   // One deadline for everything this function does, set before the first call.
   const deadline = Date.now() + TOTAL_BUDGET_MS;
@@ -256,32 +289,26 @@ export async function generateText(
   const attempt = (name: string) =>
     callOnce(name, apiKey, options, Math.min(ATTEMPT_TIMEOUT_MS, remaining()));
 
-  let model = primary;
+  let model = candidates[0];
   let response: Response;
 
   try {
     response = await attempt(model);
 
-    // One quick retry on the same model — a transient refusal often clears.
-    if (
-      !response.ok &&
-      isTransient(response.status) &&
-      remaining() > MIN_ATTEMPT_MS + 1_000
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      response = await attempt(model);
-    }
-
-    // Still refusing — try the next model rather than give up, but only while
-    // there is enough time left for the attempt to finish. Starting a call
-    // that the platform will kill mid-flight produces no answer AND no error
-    // message, which is the worst of both.
+    // Walk the chain while the refusal is the kind another model might not
+    // share, and only while enough of the budget is left for the attempt to
+    // finish. Starting a call the platform will kill mid-flight produces no
+    // answer AND no error message, which is the worst of both.
+    //
+    // There is no second attempt at the same model: with three models to try
+    // and room for about three attempts, asking a busy model twice spends an
+    // attempt on the one endpoint already known to be refusing.
     for (const next of candidates.slice(1)) {
-      if (response.ok || !isTransient(response.status)) break;
+      if (response.ok || !shouldTryAnotherModel(response.status)) break;
       if (remaining() < MIN_ATTEMPT_MS) break;
 
       console.warn(
-        `[ai] ${model} ตอบ ${response.status} — กำลังลองรุ่นสำรอง ${next}`
+        `[ai] ${model} ตอบ ${response.status} — กำลังลองรุ่นถัดไป ${next}`
       );
       model = next;
       response = await attempt(model);
@@ -305,8 +332,13 @@ export async function generateText(
     // request, so only a short prefix is kept — enough to debug, not enough to
     // turn an error log into a copy of the prompt.
     const body = (await response.text().catch(() => "")).slice(0, 300);
+
+    console.error(
+      `[ai] ทุกรุ่นถูกปฏิเสธ รุ่นสุดท้ายคือ ${model} สถานะ ${response.status}`
+    );
+
     throw new AiRequestError(
-      `บริการ AI ตอบกลับด้วยสถานะ ${response.status}: ${body}`,
+      describeFailure(response.status, body),
       response.status
     );
   }
