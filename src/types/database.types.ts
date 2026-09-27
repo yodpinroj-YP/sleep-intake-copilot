@@ -9,7 +9,20 @@
  *   npx supabase gen types typescript --project-id <project-ref> \
  *     --schema public > src/types/database.types.ts
  */
-export type UserRole = "patient" | "clinician" | "admin";
+/**
+ * 'clinician' is a legacy value: it predates the nurse/physician split and
+ * cannot be removed, because PostgreSQL enums only grow. Nothing new is
+ * written with it — 0007 converted the rows that held it — but it stays
+ * accepted so an unconverted account keeps its read access instead of
+ * silently losing it. Use the helpers in `src/lib/roles.ts` rather than
+ * comparing to these strings.
+ */
+export type UserRole =
+  | "patient"
+  | "nurse"
+  | "physician"
+  | "clinician"
+  | "admin";
 export type IntakeStatus = "not_started" | "in_progress" | "completed" | "abandoned";
 export type ReviewStatus = "pending_review" | "approved" | "rejected";
 export type ResponseSource = "structured_choice" | "free_text" | "ai_extracted";

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createClient } from "@/lib/supabase/server";
+import { isCareTeam } from "@/lib/roles";
 import { generateSummaryForSession } from "@/services/ai/summary-service";
 
 /**
@@ -8,7 +9,7 @@ import { generateSummaryForSession } from "@/services/ai/summary-service";
  *
  * Asks the model for a draft summary of one session and files it for review.
  *
- * CLINICIAN ONLY, AND CHECKED HERE.
+ * CARE TEAM ONLY, AND CHECKED HERE.
  *
  * Every other write path in this application is protected by RLS, so a mistake
  * in a route is caught by the database. This one is not: the generator uses
@@ -52,7 +53,11 @@ export async function POST(
     .eq("id", user.id)
     .single();
 
-  if (profile?.role !== "clinician" && profile?.role !== "admin") {
+  // Asking for a draft is a task, not a decision, so a nurse may do it — the
+  // draft lands `pending_review` either way and only a physician can accept
+  // it. Keeping this open to the whole care team is what makes the nurse's
+  // role useful rather than decorative.
+  if (!isCareTeam(profile?.role)) {
     // Deliberately the same shape of answer a patient would get for a session
     // that does not exist: this endpoint should not confirm to a patient that
     // a given session id is real.

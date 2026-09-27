@@ -33,25 +33,42 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 
-const URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const PASSWORD = process.env.RLS_TEST_PASSWORD;
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing ${name} — see the header of this file.`);
+  return value;
+}
+
+const URL = requireEnv("NEXT_PUBLIC_SUPABASE_URL");
+const ANON = requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+const SERVICE = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+const PASSWORD = requireEnv("RLS_TEST_PASSWORD");
 
 const PATIENT_A = "patient-a@example.com";
 const PATIENT_B = "patient-b@example.com";
-const CLINICIAN = "clinician@example.com";
-const TEST_EMAILS = [PATIENT_A, PATIENT_B, CLINICIAN];
+// Named for the account, not the role it holds: this address was created
+// before the nurse/physician split and 0007 converted it to 'physician'.
+const PHYSICIAN = "clinician@example.com";
+const NURSE = "nurse@example.com";
+const TEST_EMAILS = [PATIENT_A, PATIENT_B, PHYSICIAN, NURSE];
 
 /** Never reuses a stored session — each client is exactly one identity. */
-function freshClient(key) {
+function freshClient(key: string): SupabaseClient {
   return createClient(URL, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
 
-async function signIn(email) {
+/** Fails loudly rather than letting an undefined id reach a query. */
+function idOf(users: User[], email: string): string {
+  const found = users.find((u) => u.email === email);
+  if (!found) throw new Error(`No account ${email} in this database.`);
+  return found.id;
+}
+
+async function signIn(email: string): Promise<SupabaseClient> {
   const client = freshClient(ANON);
   const { error } = await client.auth.signInWithPassword({
     email,
@@ -63,29 +80,22 @@ async function signIn(email) {
   return client;
 }
 
-let admin;
-let alice; // patient A
-let bob; // patient B
-let doctor;
-let stranger; // signed in as nobody
+let admin!: SupabaseClient;
+let alice!: SupabaseClient; // patient A
+let bob!: SupabaseClient; // patient B
+let doctor!: SupabaseClient; // physician
+let nurse!: SupabaseClient;
+let stranger!: SupabaseClient; // signed in as nobody
 
-let aliceId;
-let bobId;
-let aliceSession;
-let bobSession;
-let aliceSummaryId;
+let aliceId = "";
+let bobId = "";
+let nurseId = "";
+let aliceSession = "";
+let bobSession = "";
+let aliceSummaryId = "";
 
 describe("Row Level Security", () => {
   before(async () => {
-    for (const [name, value] of [
-      ["NEXT_PUBLIC_SUPABASE_URL", URL],
-      ["NEXT_PUBLIC_SUPABASE_ANON_KEY", ANON],
-      ["SUPABASE_SERVICE_ROLE_KEY", SERVICE],
-      ["RLS_TEST_PASSWORD", PASSWORD],
-    ]) {
-      if (!value) throw new Error(`Missing ${name} — see the header of this file.`);
-    }
-
     admin = freshClient(SERVICE);
 
     // The guard. Staging contains three accounts and nothing else; any other
@@ -93,7 +103,7 @@ describe("Row Level Security", () => {
     const { data: userList, error: listError } = await admin.auth.admin.listUsers();
     if (listError) throw new Error(`Could not list users: ${listError.message}`);
 
-    const emails = userList.users.map((u) => u.email);
+    const emails = userList.users.map((u) => u.email ?? "");
     const unexpected = emails.filter((e) => !TEST_EMAILS.includes(e));
     if (unexpected.length > 0) {
       throw new Error(
@@ -109,8 +119,9 @@ describe("Row Level Security", () => {
       }
     }
 
-    aliceId = userList.users.find((u) => u.email === PATIENT_A).id;
-    bobId = userList.users.find((u) => u.email === PATIENT_B).id;
+    aliceId = idOf(userList.users, PATIENT_A);
+    bobId = idOf(userList.users, PATIENT_B);
+    nurseId = idOf(userList.users, NURSE);
 
     // Seed through the service-role client on purpose: questionnaire_scores
     // and safety_flags have no INSERT policy for authenticated at all, so the
@@ -125,8 +136,8 @@ describe("Row Level Security", () => {
       .select("id, patient_id");
     if (seedError) throw new Error(`Seeding failed: ${seedError.message}`);
 
-    aliceSession = sessions.find((s) => s.patient_id === aliceId).id;
-    bobSession = sessions.find((s) => s.patient_id === bobId).id;
+    aliceSession = sessions!.find((s) => s.patient_id === aliceId)!.id;
+    bobSession = sessions!.find((s) => s.patient_id === bobId)!.id;
 
     await admin.from("questionnaire_scores").insert({
       session_id: aliceSession,
@@ -152,7 +163,7 @@ describe("Row Level Security", () => {
       })
       .select("id")
       .single();
-    aliceSummaryId = summary.id;
+    aliceSummaryId = summary!.id;
 
     await admin.from("ai_processing_logs").insert({
       session_id: aliceSession,
@@ -163,8 +174,30 @@ describe("Row Level Security", () => {
 
     alice = await signIn(PATIENT_A);
     bob = await signIn(PATIENT_B);
-    doctor = await signIn(CLINICIAN);
+    doctor = await signIn(PHYSICIAN);
+    nurse = await signIn(NURSE);
     stranger = freshClient(ANON);
+
+    // The roles these two accounts hold are the subject of half these tests,
+    // so assert them rather than assuming the migrations were applied here.
+    // A nurse who is still a 'patient' in this database would make the
+    // "nurse cannot approve" test pass for entirely the wrong reason.
+    const physicianId = idOf(userList.users, PHYSICIAN);
+    const roleOf = async (id: string) => {
+      const { data } = await admin.from("profiles").select("role").eq("id", id).single();
+      return data?.role;
+    };
+    const physicianRole = await roleOf(physicianId);
+    const nurseRole = await roleOf(nurseId);
+    if (physicianRole !== "physician") {
+      throw new Error(
+        `${PHYSICIAN} holds role '${physicianRole}', expected 'physician'. ` +
+          "Has 0007 been run against this database?"
+      );
+    }
+    if (nurseRole !== "nurse") {
+      throw new Error(`${NURSE} holds role '${nurseRole}', expected 'nurse'.`);
+    }
   });
 
   after(async () => {
@@ -183,7 +216,7 @@ describe("Row Level Security", () => {
 
   it("a patient can read their own intake session", async () => {
     const { data } = await alice.from("intake_sessions").select("id").eq("id", aliceSession);
-    assert.equal(data.length, 1);
+    assert.equal(data!.length, 1);
   });
 
   it("a patient cannot read another patient's intake session", async () => {
@@ -191,7 +224,7 @@ describe("Row Level Security", () => {
     // RLS filters rather than refuses: the row is invisible, not forbidden.
     // That distinction matters — a 403 would confirm the row exists.
     assert.equal(error, null);
-    assert.equal(data.length, 0);
+    assert.equal(data!.length, 0);
   });
 
   it("a signed-out visitor can read no intake sessions at all", async () => {
@@ -204,7 +237,7 @@ describe("Row Level Security", () => {
       .from("intake_sessions")
       .select("id")
       .in("id", [aliceSession, bobSession]);
-    assert.equal(data.length, 2);
+    assert.equal(data!.length, 2);
   });
 
   it("a patient cannot read another patient's scores", async () => {
@@ -212,12 +245,12 @@ describe("Row Level Security", () => {
       .from("questionnaire_scores")
       .select("id")
       .eq("session_id", aliceSession);
-    assert.equal(data.length, 0);
+    assert.equal(data!.length, 0);
   });
 
   it("a patient cannot read another patient's safety flags", async () => {
     const { data } = await bob.from("safety_flags").select("id").eq("session_id", aliceSession);
-    assert.equal(data.length, 0);
+    assert.equal(data!.length, 0);
   });
 
   it("a patient cannot read the AI processing log", async () => {
@@ -230,7 +263,7 @@ describe("Row Level Security", () => {
       .from("ai_processing_logs")
       .select("id")
       .eq("session_id", aliceSession);
-    assert.equal(data.length, 1);
+    assert.equal(data!.length, 1);
   });
 
   // -------------------------------------------------------------- writing
@@ -248,7 +281,7 @@ describe("Row Level Security", () => {
       .select("chief_complaint")
       .eq("id", aliceSession)
       .single();
-    assert.equal(check.chief_complaint, "RLS test — Alice");
+    assert.equal(check!.chief_complaint, "RLS test — Alice");
   });
 
   it("a patient cannot write their own questionnaire score", async () => {
@@ -286,7 +319,7 @@ describe("Row Level Security", () => {
       .select("status")
       .eq("id", aliceSummaryId)
       .single();
-    assert.equal(check.status, "pending_review");
+    assert.equal(check!.status, "pending_review");
   });
 
   it("a clinician can approve an AI summary", async () => {
@@ -301,7 +334,126 @@ describe("Row Level Security", () => {
       .select("status")
       .eq("id", aliceSummaryId)
       .single();
-    assert.equal(check.status, "approved");
+    assert.equal(check!.status, "approved");
+  });
+
+  // ------------------------------------------- nurse and physician differ
+
+  it("a nurse can read every patient's intake session", async () => {
+    const { data } = await nurse
+      .from("intake_sessions")
+      .select("id")
+      .in("id", [aliceSession, bobSession]);
+    assert.equal(data!.length, 2, "A nurse runs the intake queue and must see it.");
+  });
+
+  it("a nurse can read scores and safety flags", async () => {
+    const { data: scores } = await nurse
+      .from("questionnaire_scores")
+      .select("id")
+      .eq("session_id", aliceSession);
+    assert.equal(scores!.length, 1);
+
+    const { data: flags } = await nurse
+      .from("safety_flags")
+      .select("id")
+      .eq("session_id", aliceSession);
+    assert.equal(flags!.length, 1);
+  });
+
+  it("a nurse cannot approve an AI summary", async () => {
+    // Seed a second draft: the physician approved version 1 further up.
+    const { data: draft } = await admin
+      .from("clinician_summaries")
+      .insert({
+        session_id: aliceSession,
+        version: 2,
+        summary_text: "RLS test — nurse must not approve this",
+        model: "rls-test",
+      })
+      .select("id")
+      .single();
+
+    const { data } = await nurse
+      .from("clinician_summaries")
+      .update({ status: "approved" })
+      .eq("id", draft!.id)
+      .select("id");
+    assert.equal(data?.length ?? 0, 0);
+
+    const { data: check } = await admin
+      .from("clinician_summaries")
+      .select("status")
+      .eq("id", draft!.id)
+      .single();
+    assert.equal(
+      check!.status,
+      "pending_review",
+      "A nurse accepted an AI draft into the record. That is the one decision " +
+        "the nurse/physician split exists to separate."
+    );
+  });
+
+  it("a nurse cannot acknowledge a safety flag", async () => {
+    const { data: flag } = await admin
+      .from("safety_flags")
+      .select("id")
+      .eq("session_id", aliceSession)
+      .single();
+
+    await nurse
+      .from("safety_flags")
+      .update({ acknowledged_at: new Date().toISOString() })
+      .eq("id", flag!.id);
+
+    const { data: check } = await admin
+      .from("safety_flags")
+      .select("acknowledged_at")
+      .eq("id", flag!.id)
+      .single();
+    assert.equal(check!.acknowledged_at, null);
+  });
+
+  it("a physician can acknowledge a safety flag", async () => {
+    const { data: flag } = await admin
+      .from("safety_flags")
+      .select("id")
+      .eq("session_id", aliceSession)
+      .single();
+
+    const { error } = await doctor
+      .from("safety_flags")
+      .update({ acknowledged_at: new Date().toISOString() })
+      .eq("id", flag!.id);
+    assert.equal(error, null);
+
+    const { data: check } = await admin
+      .from("safety_flags")
+      .select("acknowledged_at")
+      .eq("id", flag!.id)
+      .single();
+    assert.notEqual(check!.acknowledged_at, null);
+  });
+
+  it("a nurse cannot promote themselves to physician", async () => {
+    await nurse.from("profiles").update({ role: "physician" }).eq("id", nurseId);
+
+    const { data: after } = await admin
+      .from("profiles")
+      .select("role")
+      .eq("id", nurseId)
+      .single();
+
+    if (after!.role !== "nurse") {
+      await admin.from("profiles").update({ role: "nurse" }).eq("id", nurseId);
+    }
+
+    assert.equal(
+      after!.role,
+      "nurse",
+      "The column privileges from 0005 must cover the new roles too — " +
+        "a split nobody can cross by editing their own row is the whole point."
+    );
   });
 
   // ------------------------------------------------- the one that matters
@@ -319,12 +471,12 @@ describe("Row Level Security", () => {
 
     // Undo before asserting, so a failure here cannot leave a patient
     // account holding clinician access in the staging database.
-    if (after.role !== "patient") {
+    if (after!.role !== "patient") {
       await admin.from("profiles").update({ role: "patient" }).eq("id", aliceId);
     }
 
     assert.equal(
-      after.role,
+      after!.role,
       "patient",
       "A patient changed their own role. Every policy that calls is_clinician() " +
         "now returns true for them, which means read access to every patient " +
