@@ -12,9 +12,14 @@
 --     separately from LLM-generated output (clinician_summaries) so it's
 --     obvious which rows are exact and which need clinician verification.
 --   - Every AI-generated clinical artifact carries a review status.
---   - A patient can never self-promote to 'clinician' (see the column
---     privilege revoke near the bottom) — role changes are service-role
---     only, i.e. done through a controlled admin action server-side.
+--   - A patient can never self-promote to 'clinician' — role changes are
+--     service-role only, i.e. done through a controlled admin action
+--     server-side. NOTE: this file never actually enforced that. The column
+--     privileges that do are in 0005_profiles_column_privileges.sql, added
+--     after tests/rls/access-control.test.ts proved a patient could change
+--     their own role. Left here, corrected, rather than quietly rewritten:
+--     the gap between what a schema claims and what it enforces is the
+--     whole reason those tests exist.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
