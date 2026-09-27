@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:rls": "node --env-file=.env.local --test \"tests/rls/**/*.test.ts\"",
     "check:ai": "node --env-file=.env.local scripts/check-ai.mjs",
     "check:ai:full": "node --env-file=.env.local scripts/check-ai.mjs --full",
     "check:ai:models": "node --env-file=.env.local scripts/list-ai-models.mjs"

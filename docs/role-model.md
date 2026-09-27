@@ -1,12 +1,20 @@
 # Role model — design for caregivers, nurses and doctors
 
-Status: **designed, not built.** Nothing in this document is implemented. It
-exists so that the decisions are made while there is time to think about them,
-rather than while someone is typing.
+Status as of 27 September 2026: **the nurse/physician split is built, tested
+and live. Caregivers are not.**
 
-Today the system has three roles: `patient`, `clinician`, `admin`. That was
-the right size for proving the clinical workflow, and it is not the right size
-for a hospital.
+- Staging database, separate from production — done.
+- Access-control tests for the roles that exist — done, 20 of them. The first
+  run found a real hole; see `0005_profiles_column_privileges.sql`.
+- Nurse/physician split — done: `0006`, `0007`, `src/lib/roles.ts`, and six
+  tests that hold the line between reading and deciding.
+- `audit_log` — not started.
+- Caregivers and `consents` — not started. Both clinical decisions they depend
+  on have been made; they are recorded below.
+
+The roles are now `patient`, `nurse`, `physician`, `admin`, plus the legacy
+`clinician` value that nothing is written with any more. What follows is the
+reasoning, kept because the reasoning outlasts the migration.
 
 ## What is missing, and why each one matters
 
@@ -33,11 +41,13 @@ can be widened in one place instead of in thirteen.
 
 So the nurse/doctor split is mostly additive:
 
-1. Add `nurse` and `doctor` to the `user_role` enum.
+1. Add `nurse` and `physician` to the `user_role` enum. ('physician' rather
+   than 'doctor': 'doctor' does not say whether it means a medical
+   qualification or a doctorate.)
 2. Keep `is_clinician()` meaning **"is on the care team"** — nurse, doctor,
    the legacy `clinician` value, or admin. All 13 existing policies keep
    working unchanged, and existing rows keep their meaning.
-3. Add a second helper, `is_doctor()`, and use it **only** where a decision is
+3. Add a second helper, `is_physician()`, and use it **only** where a decision is
    being recorded: approving or rejecting an AI summary, and acknowledging a
    safety flag.
 
@@ -68,18 +78,49 @@ Access is then "this row exists and `revoked_at is null`", added as an
 additional policy alongside the existing patient-owns-their-row policies —
 never by loosening those.
 
-Two decisions that need making before writing any of it:
+Two decisions, both made on 27 September 2026 by the clinician on the project.
+Neither is technical; both are recorded here because a migration is a bad
+place to discover that nobody had decided.
 
-- **Can a caregiver see safety flags?** A drowsy-driving flag is exactly the
-  thing a family member should know, and exactly the thing a patient might not
-  want shared. The safe default is no, with the patient able to opt in.
-- **Can a caregiver answer on the patient's behalf?** If yes,
-  `intake_responses` needs to record *who* answered, because a questionnaire
-  answered by a relative is different clinical evidence from one answered by
-  the patient.
+**Can a caregiver see safety flags? Yes.**
 
-Neither question is technical, and both are easier to answer now than halfway
-through a migration.
+Decided against this document's earlier suggested default of "no, with opt-in".
+The reasoning is clinical: the flag this system raises most often is about
+falling asleep at the wheel, and the person who can act on that — take the
+keys, drive to the appointment, notice it happening again — is the family
+member, not the patient. A warning delivered only to the person least able to
+observe themselves is a warning delivered nowhere.
+
+What this changes in the build: the caregiver's `select` policy on
+`safety_flags` mirrors the patient's, rather than being withheld.
+
+One condition that should travel with this decision, because it is what makes
+it defensible to an ethics committee rather than merely convenient: **the
+caregiver link itself carries the patient's consent to it.** Granting access is
+an act the patient performs, `consents` records what was agreed and when, and
+revoking the link revokes the visibility in the same motion. The patient is
+therefore never surprised by what a relative can see — they granted exactly
+that. Sharing without a recorded, revocable grant is a different thing wearing
+the same name, and should not be built.
+
+(A patient who lacks the capacity to grant it is a separate legal path —
+guardianship, not consent — and is out of scope until someone who knows Thai
+health law has looked at it. Flagging, not advising.)
+
+**Can a caregiver answer on the patient's behalf? Yes.**
+
+What this changes in the build, and it is not small: `intake_responses` needs
+`answered_by uuid references public.profiles (id)`, defaulting to the patient.
+A STOP-BANG item about observed apnoea answered by the spouse who watched it
+happen is *better* evidence than the patient's own guess; an ESS item about
+the patient's own likelihood of dozing, answered by a relative, is *worse*.
+Same table, same score, different confidence — and a clinician cannot tell
+which they are reading unless the row says so.
+
+So the clinician's screen must show it. A score assembled from a mix of
+sources without saying so is the same failure as reporting an incomplete
+score as if it were complete, which this project already refuses to do
+elsewhere.
 
 ## What has to exist first
 
@@ -96,11 +137,19 @@ something a clinician notices and questions, while data reaching the wrong
 person is noticed by nobody. The suite needed is mechanical — sign in as each
 role, assert what is visible and, more importantly, what is not.
 
-## Suggested order
+## Order — what happened, and what is left
 
-1. Staging database + RLS tests for the roles that exist today. No behaviour
-   changes. This is the safety net.
-2. Nurse/doctor split. Small, additive, and immediately useful.
-3. `audit_log`. Once several kinds of user can reach the same record, "who
-   looked at what, and when" stops being optional.
-4. Caregivers plus `consents`, together. Neither makes sense alone.
+1. ~~Staging database + RLS tests for the roles that exist today.~~ **Done.**
+   The safety net was built first, and it caught something on its first run:
+   `profiles` had no column privileges, so any patient could set their own
+   role to `clinician` and read every patient in the database. The schema had
+   claimed otherwise in a comment since day one. This is the whole argument
+   for doing step 1 before step 2, and it made it by itself.
+2. ~~Nurse/physician split.~~ **Done.** Additive as predicted: `is_clinician()`
+   widened in one place, all 13 policies that call it untouched, and
+   `is_physician()` added to exactly two actions.
+3. `audit_log`. Next. Once several kinds of user can reach the same record,
+   "who looked at what, and when" stops being optional.
+4. Caregivers plus `consents`, together. Neither makes sense alone. Both
+   decisions above are settled, and `intake_responses.answered_by` is the
+   schema change they require.

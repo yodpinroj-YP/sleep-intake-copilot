@@ -5,6 +5,7 @@ import { IntakeSessionsPanel } from "@/components/intake-sessions-panel";
 import { ClinicianIntakePanel } from "@/components/clinician-intake-panel";
 import { ClinicianReviewPanel } from "@/components/clinician-review-panel";
 import { createClient } from "@/lib/supabase/server";
+import { isCareTeam, isPhysician } from "@/lib/roles";
 import {
   listIntakeSessionsForReview,
   listMyIntakeSessions,
@@ -28,10 +29,11 @@ export default async function DashboardPage() {
     .eq("id", user.id)
     .single();
 
-  const isClinician = profile?.role === "clinician" || profile?.role === "admin";
+  const onCareTeam = isCareTeam(profile?.role);
+  const canDecide = isPhysician(profile?.role);
 
-  const sessions = isClinician ? [] : await listMyIntakeSessions(supabase, user.id);
-  const [pendingSummaries, intakesForReview] = isClinician
+  const sessions = onCareTeam ? [] : await listMyIntakeSessions(supabase, user.id);
+  const [pendingSummaries, intakesForReview] = onCareTeam
     ? await Promise.all([
         listPendingClinicianSummaries(supabase),
         listIntakeSessionsForReview(supabase),
@@ -54,10 +56,19 @@ export default async function DashboardPage() {
         </form>
       </div>
 
-      {isClinician ? (
+      {onCareTeam ? (
         <>
           <ClinicianIntakePanel sessions={intakesForReview} />
-          <ClinicianReviewPanel initialSummaries={pendingSummaries} />
+          {/* A nurse sees the same queue and the same drafts, without the
+              approve and reject controls. The database would refuse those
+              writes anyway; showing buttons that fail is how an interface
+              loses people's trust. */}
+          <ClinicianReviewPanel
+            initialSummaries={pendingSummaries}
+            readOnly={!canDecide}
+            readOnlyNote="เฉพาะแพทย์เท่านั้นที่อนุมัติหรือปฏิเสธร่างได้ — บัญชีนี้ดูได้อย่างเดียว"
+            heading={canDecide ? "ร่างสรุปที่รอคุณตรวจสอบ" : "ร่างสรุปที่รอแพทย์ตรวจสอบ"}
+          />
         </>
       ) : (
         <IntakeSessionsPanel initialSessions={sessions} />
