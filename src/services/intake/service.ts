@@ -3,6 +3,11 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { ESS_DOMAIN, ESS_QUESTION_KEYS } from "@/lib/ess";
+import {
+  ISI_DOMAIN,
+  ISI_QUESTION_KEYS,
+  ISI_SCREENING_QUESTION_KEY,
+} from "@/lib/isi";
 import { STOPBANG_DOMAIN, STOPBANG_QUESTION_KEYS } from "@/lib/stopbang";
 import type { Database, ReviewStatus } from "@/types/database.types";
 
@@ -172,6 +177,16 @@ export async function getStopBangAnswers(
  * null, and a scoring engine reading that back would treat it as unanswered —
  * so the row would exist, look answered in the database, and score as a gap.
  * Refusing it here keeps those two views of the data honest.
+ *
+ * AN EXPLICIT `null` IS DIFFERENT, AND MEANS "RETRACT THIS ANSWER". The row is
+ * deleted, which is what returns the item to genuinely unanswered — the state
+ * the whole scoring design distinguishes from a zero. This is why the callers
+ * pass null through instead of omitting the key: an absent key means "this
+ * instrument does not manage that question", while null means "the patient
+ * took their answer back", and those cannot be the same signal.
+ *
+ * Deleting requires the policy added in 0008, which allows it only on the
+ * patient's own session and only while that session is still open.
  */
 async function saveStructuredResponses(
   supabase: TypedSupabaseClient,
@@ -202,8 +217,18 @@ async function saveStructuredResponses(
     source: "structured_choice";
   }[] = [];
 
+  const toDelete: string[] = [];
+
   for (const key of questionKeys) {
     const value = answers[key];
+
+    // Retraction. Only meaningful when a row exists; otherwise the item is
+    // already unanswered and there is nothing to do.
+    if (value === null) {
+      const existingId = existingByKey.get(key);
+      if (existingId) toDelete.push(existingId);
+      continue;
+    }
 
     const usable =
       typeof value === "boolean" ||
@@ -234,6 +259,17 @@ async function saveStructuredResponses(
     }
   }
 
+  if (toDelete.length > 0) {
+    const { error } = await supabase
+      .from("intake_responses")
+      .delete()
+      .in("id", toDelete);
+
+    if (error) {
+      throw new Error(`Failed to clear answers: ${error.message}`);
+    }
+  }
+
   if (toInsert.length > 0) {
     const { error } = await supabase.from("intake_responses").insert(toInsert);
 
@@ -249,8 +285,11 @@ export interface StopBangIntakeInput {
   neckCircumferenceCm: number | null;
   dateOfBirth: string | null;
   sex: "male" | "female" | "other" | null;
-  /** question_key -> yes/no. Keys not in STOPBANG_QUESTION_KEYS are ignored. */
-  answers: Record<string, boolean>;
+  /**
+   * question_key -> yes/no, or null to retract a saved answer. Keys not in
+   * STOPBANG_QUESTION_KEYS are ignored.
+   */
+  answers: Record<string, boolean | null>;
 }
 
 /**
@@ -356,8 +395,11 @@ export async function getEssAnswers(
 }
 
 export interface EssIntakeInput {
-  /** question_key -> 0|1|2|3. Keys not in ESS_QUESTION_KEYS are ignored. */
-  answers: Record<string, number>;
+  /**
+   * question_key -> 0|1|2|3, or null to retract a saved answer. Keys not in
+   * ESS_QUESTION_KEYS are ignored.
+   */
+  answers: Record<string, number | null>;
 }
 
 /**
@@ -406,6 +448,102 @@ export async function saveEssIntake(
   return session;
 }
 
+/**
+ * Loads the saved ISI answers plus the screening answer.
+ *
+ * The screening answer is returned separately from the items, and as
+ * `boolean | null`, because its three states drive the form: null means the
+ * patient has not reached the question, false means they said they have no
+ * insomnia symptoms, true means the seven items should be shown.
+ */
+export async function getIsiAnswers(
+  supabase: TypedSupabaseClient,
+  sessionId: string
+): Promise<{ hasSleepDifficulty: boolean | null; answers: Record<string, number> }> {
+  const { data, error } = await supabase
+    .from("intake_responses")
+    .select("question_key, answer_value")
+    .eq("session_id", sessionId)
+    .in("question_key", [...ISI_QUESTION_KEYS, ISI_SCREENING_QUESTION_KEY]);
+
+  if (error) {
+    throw new Error(`Failed to load saved answers: ${error.message}`);
+  }
+
+  let hasSleepDifficulty: boolean | null = null;
+  const answers: Record<string, number> = {};
+
+  for (const row of data ?? []) {
+    const value = row.answer_value;
+
+    if (row.question_key === ISI_SCREENING_QUESTION_KEY) {
+      if (typeof value === "boolean") hasSleepDifficulty = value;
+      continue;
+    }
+
+    // 0–4 here, not 0–3: this instrument has a five-point scale.
+    if (value === 0 || value === 1 || value === 2 || value === 3 || value === 4) {
+      answers[row.question_key] = value;
+    }
+  }
+
+  return { hasSleepDifficulty, answers };
+}
+
+export interface IsiIntakeInput {
+  /** The screening answer. False means the seven items are not asked. */
+  hasSleepDifficulty: boolean;
+  /**
+   * question_key -> 0|1|2|3|4, or null to retract a saved answer. Ignored
+   * when hasSleepDifficulty is false.
+   */
+  answers: Record<string, number | null>;
+}
+
+/**
+ * Saves the ISI screening answer and, when the patient reported symptoms, the
+ * seven item answers.
+ *
+ * A 'no' at screening writes the screening row and nothing else. The item
+ * answers are not cleared: if the patient answers the questionnaire, changes
+ * their mind at screening, and then changes it back, their answers are still
+ * there. What keeps the clinical record honest in the meantime is that
+ * `scoreAndSaveIsiSession` deletes the *score*, so nothing downstream reports
+ * a severity for a patient who has just said they have no symptoms.
+ */
+export async function saveIsiIntake(
+  supabase: TypedSupabaseClient,
+  userId: string,
+  sessionId: string,
+  input: IsiIntakeInput
+) {
+  const { data: session, error: sessionError } = await supabase
+    .from("intake_sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .eq("patient_id", userId)
+    .maybeSingle();
+
+  if (sessionError) {
+    throw new Error(`Failed to load intake session: ${sessionError.message}`);
+  }
+
+  if (!session) {
+    throw new Error("ไม่พบแบบประเมินนี้ หรือคุณไม่มีสิทธิ์เข้าถึง");
+  }
+
+  const keys = input.hasSleepDifficulty
+    ? [ISI_SCREENING_QUESTION_KEY, ...ISI_QUESTION_KEYS]
+    : [ISI_SCREENING_QUESTION_KEY];
+
+  await saveStructuredResponses(supabase, sessionId, ISI_DOMAIN, keys, {
+    ...input.answers,
+    [ISI_SCREENING_QUESTION_KEY]: input.hasSleepDifficulty,
+  });
+
+  return session;
+}
+
 /** One STOP-BANG letter as the clinician view renders it. */
 export interface StopBangBreakdownItem {
   letter: string;
@@ -422,6 +560,48 @@ export interface EssBreakdownItem {
   score: number | null;
   answered: boolean;
 }
+
+/** One ISI item as the clinician view renders it. Same shape as ESS, 0–4. */
+export interface IsiBreakdownItem {
+  field: string;
+  position: number;
+  label: string;
+  score: number | null;
+  answered: boolean;
+}
+
+/**
+ * What the clinician screen knows about insomnia for one session.
+ *
+ * Four states, not two, because this instrument is asked conditionally and
+ * each of these means something different to the person reading the screen:
+ *
+ * - `not_screened` — the patient has not reached the question. A gap.
+ * - `no_symptoms` — asked, and they reported none. A finding, and the reason
+ *   the screening question is worth storing at all.
+ * - `symptoms_reported` — they said yes and have not finished the items. Not
+ *   a score, but not nothing either: the patient has already told us they
+ *   have trouble sleeping.
+ * - `scored` — the seven items produced a total.
+ *
+ * Collapsing the first three into one "no ISI data" would throw away the
+ * answer the patient gave, which is the thing the screening question exists
+ * to capture.
+ */
+export type IsiView =
+  | { state: "not_screened" }
+  | { state: "no_symptoms" }
+  | { state: "symptoms_reported" }
+  | {
+      state: "scored";
+      score: number;
+      severity: string | null;
+      incomplete: boolean;
+      answeredCount: number;
+      maxPossibleScore: number;
+      breakdown: IsiBreakdownItem[];
+      computedAt: string;
+    };
 
 export interface ClinicianSessionView {
   id: string;
@@ -454,6 +634,8 @@ export interface ClinicianSessionView {
     breakdown: EssBreakdownItem[];
     computedAt: string;
   } | null;
+  /** Never null — "no data" is itself one of four meanings. See IsiView. */
+  isi: IsiView;
   flags: {
     id: string;
     flagType: string;
@@ -471,6 +653,46 @@ export interface ClinicianSessionView {
  * degrades to an empty breakdown with zeroed counts instead of throwing in the
  * middle of a clinician's list. The caller decides which item shape it wrote.
  */
+/**
+ * Resolves the four ISI states from the two pieces of evidence that exist.
+ *
+ * The screening answer is checked before the score on purpose. The two should
+ * never disagree — scoreAndSaveIsiSession deletes the score when the answer is
+ * 'no' — but if they ever do, the patient's own most recent statement is the
+ * one to believe, and a stale severity is exactly what must not reach a
+ * clinician's screen.
+ */
+function readIsiView(
+  screening: boolean | undefined,
+  scoreRow:
+    | {
+        score: number | string;
+        risk_category: string | null;
+        score_breakdown: unknown;
+        computed_at: string;
+      }
+    | undefined
+): IsiView {
+  if (screening === false) return { state: "no_symptoms" };
+
+  if (scoreRow) {
+    const parsed = readScoreBreakdown<IsiBreakdownItem>(scoreRow.score_breakdown);
+    return {
+      state: "scored",
+      score: Number(scoreRow.score),
+      severity: scoreRow.risk_category,
+      incomplete: parsed.incomplete,
+      answeredCount: parsed.answeredCount,
+      maxPossibleScore: parsed.maxPossibleScore,
+      breakdown: parsed.breakdown,
+      computedAt: scoreRow.computed_at,
+    };
+  }
+
+  if (screening === true) return { state: "symptoms_reported" };
+  return { state: "not_screened" };
+}
+
 function readScoreBreakdown<T>(value: unknown): {
   breakdown: T[];
   answeredCount: number;
@@ -532,18 +754,27 @@ export async function listIntakeSessionsForReview(
   const sessionIds = sessions.map((s) => s.id);
   const patientIds = [...new Set(sessions.map((s) => s.patient_id))];
 
-  const [profilesResult, scoresResult, flagsResult] = await Promise.all([
-    supabase.from("profiles").select("id, full_name").in("id", patientIds),
-    supabase
-      .from("questionnaire_scores")
-      .select("session_id, instrument, score, risk_category, score_breakdown, computed_at")
-      .in("session_id", sessionIds)
-      .in("instrument", ["STOP_BANG", "ESS"]),
-    supabase
-      .from("safety_flags")
-      .select("id, session_id, flag_type, severity, trigger_source, acknowledged_at")
-      .in("session_id", sessionIds),
-  ]);
+  const [profilesResult, scoresResult, flagsResult, screeningResult] =
+    await Promise.all([
+      supabase.from("profiles").select("id, full_name").in("id", patientIds),
+      supabase
+        .from("questionnaire_scores")
+        .select("session_id, instrument, score, risk_category, score_breakdown, computed_at")
+        .in("session_id", sessionIds)
+        .in("instrument", ["STOP_BANG", "ESS", "ISI"]),
+      supabase
+        .from("safety_flags")
+        .select("id, session_id, flag_type, severity, trigger_source, acknowledged_at")
+        .in("session_id", sessionIds),
+      // The ISI screening answer is the only raw response this view reads.
+      // It has to: "asked and reported no symptoms" exists nowhere in
+      // questionnaire_scores, by design — no score row is written for it.
+      supabase
+        .from("intake_responses")
+        .select("session_id, answer_value")
+        .in("session_id", sessionIds)
+        .eq("question_key", ISI_SCREENING_QUESTION_KEY),
+    ]);
 
   const nameById = new Map(
     (profilesResult.data ?? []).map((p) => [p.id, p.full_name])
@@ -561,6 +792,17 @@ export async function listIntakeSessionsForReview(
       .filter((s) => s.instrument === "ESS")
       .map((s) => [s.session_id, s])
   );
+  const isiBySession = new Map(
+    (scoresResult.data ?? [])
+      .filter((s) => s.instrument === "ISI")
+      .map((s) => [s.session_id, s])
+  );
+  const isiScreeningBySession = new Map<string, boolean>();
+  for (const row of screeningResult.data ?? []) {
+    if (typeof row.answer_value === "boolean") {
+      isiScreeningBySession.set(row.session_id, row.answer_value);
+    }
+  }
 
   const flagsBySession = new Map<string, ClinicianSessionView["flags"]>();
   for (const flag of flagsResult.data ?? []) {
@@ -587,6 +829,10 @@ export async function listIntakeSessionsForReview(
       : null;
 
     return {
+      isi: readIsiView(
+        isiScreeningBySession.get(session.id),
+        isiBySession.get(session.id)
+      ),
       id: session.id,
       patientName: nameById.get(session.patient_id) ?? null,
       status: session.status,

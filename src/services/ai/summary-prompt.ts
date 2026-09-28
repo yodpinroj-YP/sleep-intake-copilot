@@ -12,7 +12,16 @@
  * do you when someone asks why an old summary reads differently.
  */
 
-export const PROMPT_VERSION = "summary-v1";
+/**
+ * v2 added rule 7, when the ISI arrived. A screened-out instrument was the
+ * first case where "we have no score" and "we have no information" came
+ * apart, and without the rule the model filed a patient who had been asked
+ * about insomnia under missing_information — the opposite of what happened.
+ *
+ * Summaries approved before this change still carry "summary-v1", which is
+ * the entire reason this constant is stored on every row.
+ */
+export const PROMPT_VERSION = "summary-v2";
 
 /**
  * What the model is and is not allowed to do.
@@ -48,6 +57,10 @@ export const SYSTEM_PROMPT = `คุณเป็นผู้ช่วยเต�
    ที่ระบุว่าแพทย์ควรยืนยันเรื่องใดกับผู้ป่วยโดยตรง
 
 6. เขียนเป็นภาษาไทย กระชับ ใช้ภาษาระดับที่แพทย์คุยกัน ย่อหน้าสรุปไม่เกิน 6 ประโยค
+
+7. หากแบบประเมินใดมีค่า screenedOut เป็น true แปลว่าถามคำถามคัดกรองแล้ว
+   และผู้ป่วยตอบว่าไม่มีอาการ ให้ถือเป็นข้อค้นพบและใส่ไว้ใน important_negatives
+   ห้ามใส่ไว้ใน missing_information เพราะข้อมูลนี้ไม่ได้ขาด แต่ถามแล้วและได้คำตอบ
 
 ตอบกลับเป็น JSON เท่านั้น ไม่ต้องมีข้อความอื่นนอก JSON ใช้โครงสร้างนี้
 

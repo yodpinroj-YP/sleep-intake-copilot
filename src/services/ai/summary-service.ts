@@ -1,5 +1,6 @@
 import "server-only";
 
+import { ISI_SCREENING_QUESTION_KEY } from "@/lib/isi";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { calculateAgeYears } from "@/services/intake/stopbang-scoring.ts";
 
@@ -10,6 +11,7 @@ import {
   type SummaryEss,
   type SummaryFlag,
   type SummaryInput,
+  type SummaryIsi,
   type SummaryStopBang,
 } from "./summary-input.ts";
 import {
@@ -155,8 +157,13 @@ export async function generateSummaryForSession(
     );
   }
 
-  const [profileResult, scoresResult, flagsResult, existingResult] =
-    await Promise.all([
+  const [
+    profileResult,
+    scoresResult,
+    flagsResult,
+    existingResult,
+    isiScreeningResult,
+  ] = await Promise.all([
       admin
         .from("profiles")
         .select("full_name, date_of_birth, sex")
@@ -175,6 +182,15 @@ export async function generateSummaryForSession(
         .select("version, status")
         .eq("session_id", sessionId)
         .order("version", { ascending: false }),
+      // Needed to tell "asked, reported no insomnia" apart from "not asked".
+      // Without it the model would report a screened-out patient as missing
+      // information, which is the opposite of what happened.
+      admin
+        .from("intake_responses")
+        .select("answer_value")
+        .eq("session_id", sessionId)
+        .eq("question_key", ISI_SCREENING_QUESTION_KEY)
+        .maybeSingle(),
     ]);
 
   const existing = existingResult.data ?? [];
@@ -193,6 +209,7 @@ export async function generateSummaryForSession(
 
   const stopBangRow = scores.find((s) => s.instrument === "STOP_BANG");
   const essRow = scores.find((s) => s.instrument === "ESS");
+  const isiRow = scores.find((s) => s.instrument === "ISI");
 
   let stopBang: SummaryStopBang | null = null;
   if (stopBangRow) {
@@ -220,6 +237,32 @@ export async function generateSummaryForSession(
     };
   }
 
+  const isiScreenedOut = isiScreeningResult.data?.answer_value === false;
+
+  let isi: SummaryIsi | null = null;
+  if (isiScreenedOut) {
+    isi = {
+      screenedOut: true,
+      score: null,
+      maxPossibleScore: null,
+      incomplete: false,
+      answeredCount: 0,
+      severity: null,
+      items: [],
+    };
+  } else if (isiRow) {
+    const meta = readBreakdown(isiRow.score_breakdown);
+    isi = {
+      screenedOut: false,
+      score: Number(isiRow.score),
+      maxPossibleScore: meta.maxPossibleScore,
+      incomplete: meta.incomplete,
+      answeredCount: meta.answeredCount,
+      severity: isiRow.risk_category,
+      items: meta.breakdown as SummaryIsi["items"],
+    };
+  }
+
   const flags: SummaryFlag[] = (flagsResult.data ?? []).map((flag) => ({
     type: flag.flag_type,
     severity: flag.severity,
@@ -235,6 +278,7 @@ export async function generateSummaryForSession(
     neckCircumferenceCm: session.neck_circumference_cm,
     stopBang,
     ess,
+    isi,
     flags,
   });
 

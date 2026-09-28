@@ -74,6 +74,25 @@ export interface SummaryEss {
   items: { position: number; label: string; score: number | null; answered: boolean }[];
 }
 
+/**
+ * The ISI, including the case where it was screened out.
+ *
+ * `screenedOut` is carried to the model deliberately. "The patient was asked
+ * about insomnia and reported none" belongs under the summary's "สิ่งที่ตรวจ
+ * แล้วไม่พบ" heading, and the model cannot put it there unless it is told —
+ * a null ISI would instead be reported as missing information, which is a
+ * different and wrong statement.
+ */
+export interface SummaryIsi {
+  screenedOut: boolean;
+  score: number | null;
+  maxPossibleScore: number | null;
+  incomplete: boolean;
+  answeredCount: number;
+  severity: string | null;
+  items: { position: number; label: string; score: number | null; answered: boolean }[];
+}
+
 export interface SummaryFlag {
   type: string;
   severity: "standard" | "urgent";
@@ -91,6 +110,7 @@ export interface SummaryInput {
   neckCircumferenceCm: number | null;
   stopBang: SummaryStopBang | null;
   ess: SummaryEss | null;
+  isi: SummaryIsi | null;
   flags: SummaryFlag[];
 }
 
@@ -102,6 +122,7 @@ export interface SummarySource {
   neckCircumferenceCm: number | null;
   stopBang: SummaryStopBang | null;
   ess: SummaryEss | null;
+  isi: SummaryIsi | null;
   flags: SummaryFlag[];
 }
 
@@ -128,6 +149,7 @@ export function buildSummaryInput(source: SummarySource): SummaryInput {
     neckCircumferenceCm: roundMeasurement(source.neckCircumferenceCm),
     stopBang: source.stopBang,
     ess: source.ess,
+    isi: source.isi,
     flags: source.flags,
   };
 }

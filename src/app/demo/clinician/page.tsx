@@ -50,6 +50,16 @@ const ESS_ITEMS: { field: string; label: string }[] = [
   { field: "inCarTraffic", label: "Stopped in traffic" },
 ];
 
+const ISI_ITEMS: { field: string; label: string }[] = [
+  { field: "fallingAsleep", label: "Difficulty falling asleep" },
+  { field: "stayingAsleep", label: "Difficulty staying asleep" },
+  { field: "wakingEarly", label: "Waking too early" },
+  { field: "sleepDissatisfaction", label: "Dissatisfied with sleep pattern" },
+  { field: "noticeableToOthers", label: "Noticeable to others" },
+  { field: "worriedAboutSleep", label: "Worried about sleep" },
+  { field: "interferesWithDay", label: "Interferes with daily functioning" },
+];
+
 /**
  * Builds a demo ESS result from the eight item answers.
  *
@@ -95,6 +105,52 @@ function demoEss(
   };
 }
 
+/**
+ * The same shape for the ISI, with the same rule: derive the total and the
+ * band from the answers rather than writing them by hand.
+ *
+ * The four demo cases deliberately show four different ISI states, because the
+ * states are the point of the conditional screening question — "asked, no
+ * symptoms" is a finding and "not asked" is a gap, and a demo that showed both
+ * as an empty space would be demonstrating the wrong thing.
+ */
+function demoIsi(
+  scores: (number | null)[],
+  computedAt: string
+): Extract<ClinicianSessionView["isi"], { state: "scored" }> {
+  const breakdown = ISI_ITEMS.map((item, index) => ({
+    field: item.field,
+    position: index + 1,
+    label: item.label,
+    score: scores[index],
+    answered: scores[index] !== null,
+  }));
+
+  const score = breakdown.reduce((sum, item) => sum + (item.score ?? 0), 0);
+  const answeredCount = breakdown.filter((item) => item.answered).length;
+  const missing = breakdown.length - answeredCount;
+
+  const severity =
+    score >= 22
+      ? "severe"
+      : score >= 15
+        ? "moderate"
+        : score >= 8
+          ? "subthreshold"
+          : "none";
+
+  return {
+    state: "scored",
+    score,
+    severity,
+    incomplete: missing > 0,
+    answeredCount,
+    maxPossibleScore: score + missing * 4,
+    breakdown,
+    computedAt,
+  };
+}
+
 const DEMO_SESSIONS: ClinicianSessionView[] = [
   {
     id: "demo-1",
@@ -122,6 +178,8 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       computedAt: "2026-09-18T09:24:00.000Z",
     },
     ess: demoEss([2, 3, 2, 3, 2, 1, 2, 2], "2026-09-18T09:26:00.000Z"),
+    // Screened and reported no insomnia symptoms — a finding, not a gap.
+    isi: { state: "no_symptoms" },
     flags: [
       {
         id: "demo-flag-1",
@@ -165,6 +223,8 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       computedAt: "2026-09-19T14:09:00.000Z",
     },
     ess: demoEss([3, 3, null, 2, null, 1, 2, null], "2026-09-19T14:11:00.000Z"),
+    // Said yes at screening and stopped before finishing the items.
+    isi: { state: "symptoms_reported" },
     flags: [],
   },
   {
@@ -193,6 +253,8 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
       computedAt: "2026-09-20T08:43:00.000Z",
     },
     ess: demoEss([1, 1, 0, 1, 0, 0, 1, 0], "2026-09-20T08:45:00.000Z"),
+    // Scored, and in the band that matters clinically.
+    isi: demoIsi([3, 4, 2, 3, 2, 3, 3], "2026-09-20T08:50:00.000Z"),
     flags: [],
   },
   {
@@ -224,6 +286,8 @@ const DEMO_SESSIONS: ClinicianSessionView[] = [
     // the case the urgent rule exists for, and the reason it is keyed on the
     // item rather than on the total.
     ess: demoEss([1, 1, 1, 1, 1, 1, 0, 3], "2026-09-21T19:20:00.000Z"),
+    // Never reached the question.
+    isi: { state: "not_screened" },
     flags: [
       {
         id: "demo-flag-4",
@@ -363,6 +427,42 @@ export default function ClinicianDemoPage() {
             ระบบจึงขึ้นสัญญาณเตือน<strong>ระดับด่วน</strong>เรื่องการขับขี่
             กฎข้อนี้ผูกกับคำตอบรายข้อ ไม่ใช่คะแนนรวม เพราะถ้าผูกกับคะแนนรวม
             จะพลาดคนกลุ่มนี้พอดี
+          </li>
+        </ul>
+
+        {/* Added after the ISI shipped. The four cases were already carrying
+            four different ISI states, but nothing on the page said so, and a
+            reader — including this project's own author — went through all
+            four without noticing the third instrument was there. A demo that
+            does not point at what it is demonstrating is a demo of nothing. */}
+        <p className="mt-4 font-medium">
+          และสี่เคสนี้ยังแสดงสี่สถานะของ ISI ด้วย
+        </p>
+        <p className="mt-2 text-muted-foreground">
+          ระบบนี้ไม่ยอมให้ &quot;ไม่มีคะแนน&quot; เป็นคำตอบเดียวสำหรับทุกสถานการณ์
+          เพราะการที่ผู้ป่วยไม่มีคะแนนนอนไม่หลับ อาจแปลได้สี่อย่างที่ต่างกันโดยสิ้นเชิง
+          และสามในสี่อย่างนั้นไม่ใช่ข้อมูลที่ขาดหาย แต่เป็นข้อค้นพบทางคลินิก
+        </p>
+        <ul className="mt-2 flex list-disc flex-col gap-1.5 pl-5 text-muted-foreground">
+          <li>
+            เคสแรก — <strong>ถามแล้ว ผู้ป่วยตอบว่าไม่มีอาการ</strong> นี่คือคำตอบ
+            ไม่ใช่ช่องว่าง แพทย์อ่านแล้วตัดภาวะนอนไม่หลับออกจากการวินิจฉัยได้เลย
+          </li>
+          <li>
+            เคสที่สอง — <strong>ผู้ป่วยบอกว่ามีปัญหา แต่ยังตอบแบบประเมินไม่เสร็จ</strong>{" "}
+            ระบบจะไม่คำนวณคะแนนให้ เพราะแบบประเมินที่ยังไม่ได้ทำไม่มีคะแนน
+            แต่คำว่า &quot;มี&quot; ของผู้ป่วยถูกเก็บไว้และแสดงให้แพทย์เห็น
+          </li>
+          <li>
+            เคสที่สาม — <strong>ISI 20 จาก 28</strong> ตอบครบเจ็ดข้อ
+            เข้าเกณฑ์นอนไม่หลับระดับปานกลาง มีแถบคะแนนรายข้อกำกับ
+            ให้แพทย์เห็นว่า 20 คะแนนนั้นมาจากข้อไหนบ้าง
+          </li>
+          <li>
+            เคสที่สี่ — <strong>ยังไม่ได้ถามคำถามคัดกรองเลย</strong>{" "}
+            อันนี้คือช่องว่างจริง และร่างสรุปของ AI ด้านบนก็เขียนไว้ตรง ๆ
+            ในหัวข้อ &quot;ข้อมูลที่ยังขาด&quot; ว่ายังไม่มี ISI ในระบบ
+            แทนที่จะเงียบหรือเดาแทน
           </li>
         </ul>
       </div>

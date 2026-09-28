@@ -1,6 +1,7 @@
 import "server-only";
 
 import { ESS_QUESTION_KEYS } from "@/lib/ess";
+import { ISI_QUESTION_KEYS, ISI_SCREENING_QUESTION_KEY } from "@/lib/isi";
 import { STOPBANG_QUESTION_KEYS } from "@/lib/stopbang";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -12,6 +13,15 @@ import {
   scoreEss,
 } from "./ess-scoring.ts";
 import type { EssField, EssInput, EssResult } from "./ess-scoring.ts";
+import {
+  ISI_FIELDS,
+  // Aliased on purpose. ESS answers run 0–3 and ISI answers run 0–4, so the
+  // two parsers are not interchangeable and must never be confused for one
+  // another at a call site.
+  parseItemScore as parseIsiItemScore,
+  scoreIsi,
+} from "./isi-scoring.ts";
+import type { IsiField, IsiInput, IsiResult } from "./isi-scoring.ts";
 import {
   calculateAgeYears,
   detectSafetyFlags,
@@ -433,4 +443,200 @@ export async function scoreAndSaveEssSession(
   );
 
   return { result, input, activeFlagTypes };
+}
+
+// ---------------------------------------------------------------------------
+// Insomnia Severity Index
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps each stored question key to the field the scoring engine expects.
+ * Same reasoning as ESS_KEY_TO_FIELD above: this is the one place that knows
+ * both the database's keys and the scorer's field names.
+ */
+const ISI_KEY_TO_FIELD: Record<string, IsiField> = {
+  isi_falling_asleep: "fallingAsleep",
+  isi_staying_asleep: "stayingAsleep",
+  isi_waking_early: "wakingEarly",
+  isi_dissatisfaction: "sleepDissatisfaction",
+  isi_noticeable: "noticeableToOthers",
+  isi_worried: "worriedAboutSleep",
+  isi_interference: "interferesWithDay",
+};
+
+function buildIsiInput(answers: Map<string, unknown>): IsiInput {
+  const input = Object.fromEntries(
+    ISI_FIELDS.map((field) => [field, null])
+  ) as unknown as IsiInput;
+
+  for (const key of ISI_QUESTION_KEYS) {
+    const field = ISI_KEY_TO_FIELD[key];
+
+    if (!field) {
+      throw new Error(
+        `ISI question "${key}" has no scoring field. Add it to ISI_KEY_TO_FIELD.`
+      );
+    }
+
+    input[field] = parseIsiItemScore(answers.get(key));
+  }
+
+  return input;
+}
+
+/**
+ * Three outcomes, and none of them is "a score of 0 because nobody answered".
+ *
+ * The names are deliberately the same as three of the four states in `IsiView`
+ * (see service.ts), because this engine is what decides which of them the
+ * clinician will see:
+ *
+ *   no_symptoms       — screening answered 'no'. No score row; any old one is
+ *                       deleted.
+ *   symptoms_reported — screening answered 'yes', but not one of the seven
+ *                       items has been answered yet. Also no score row, for
+ *                       exactly the same reason: an instrument nobody has
+ *                       answered has no total. A 0 written here would reach the
+ *                       clinician as "ISI 0 — no insomnia" for a patient who
+ *                       has just said the opposite.
+ *   scored            — at least one item answered, so there is a real total,
+ *                       marked incomplete if fewer than seven.
+ *
+ * The fourth view state, `not_screened`, cannot originate here: this function
+ * only ever runs after a save, and the route rejects a save with no screening
+ * answer.
+ */
+export type ScoreIsiOutcome =
+  | { state: "no_symptoms" }
+  | { state: "symptoms_reported" }
+  | { state: "scored"; result: IsiResult; input: IsiInput };
+
+/**
+ * Computes an ISI score for one session, or records that there is nothing to
+ * score.
+ *
+ * Authorization is the same as the other two engines: this uses the
+ * service-role client and bypasses RLS, so it must only be called from a route
+ * that has already proved, through the patient's own client, that the caller
+ * owns the session.
+ *
+ * TWO THINGS ARE DIFFERENT FROM ESS AND STOP-BANG.
+ *
+ * First, there are two ways for this instrument to end up with no score row —
+ * and in both of them an existing row is DELETED, not merely left unwritten.
+ * A patient who answers the seven items and then goes back and either says
+ * they have no insomnia symptoms, or clears every item, would otherwise leave
+ * a stale score behind; a stale clinical score is worse than a missing one
+ * because nothing marks it as out of date. The screening answer itself stays
+ * in `intake_responses` either way, so the clinician still sees that the
+ * question was asked and what the patient said.
+ *
+ * Second, this instrument raises no safety flags, so syncSafetyFlags is never
+ * called here. See the note on ISI_FLAG_TYPES for why that is a decision
+ * rather than an omission. Because it is never called, ISI cannot disturb the
+ * flags the other two instruments own.
+ */
+export async function scoreAndSaveIsiSession(
+  sessionId: string
+): Promise<ScoreIsiOutcome> {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new MissingServiceRoleKeyError();
+  }
+
+  const admin = createAdminClient();
+
+  const { data: session, error: sessionError } = await admin
+    .from("intake_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .single();
+
+  if (sessionError || !session) {
+    throw new Error(
+      `Cannot score: intake session not found (${sessionError?.message ?? "no row"})`
+    );
+  }
+
+  const { data: responses, error: responsesError } = await admin
+    .from("intake_responses")
+    .select("question_key, answer_value")
+    .eq("session_id", sessionId)
+    .in("question_key", [...ISI_QUESTION_KEYS, ISI_SCREENING_QUESTION_KEY]);
+
+  if (responsesError) {
+    throw new Error(`Cannot score: ${responsesError.message}`);
+  }
+
+  const answers = new Map<string, unknown>(
+    (responses ?? []).map((row) => [row.question_key, row.answer_value])
+  );
+
+  // Only an explicit false screens the instrument out. A missing answer means
+  // the patient has not reached the question yet, which is not the same as
+  // saying no, and must not silently discard a score.
+  if (answers.get(ISI_SCREENING_QUESTION_KEY) === false) {
+    await clearIsiScore(admin, sessionId);
+    return { state: "no_symptoms" };
+  }
+
+  const input = buildIsiInput(answers);
+  const result = scoreIsi(input);
+
+  // Reported symptoms, answered nothing. Treated exactly like the screened-out
+  // case as far as the database is concerned — no row, and any previous row
+  // removed — because the alternative is a stored 0 with risk_category 'none',
+  // which the clinician's screen would render as "ISI 0 / 28" for a patient
+  // who has just reported insomnia. The patient's 'yes' is not lost: it lives
+  // in `intake_responses`, and readIsiView turns a screening 'yes' with no
+  // score row into the `symptoms_reported` state.
+  if (result.answeredCount === 0) {
+    await clearIsiScore(admin, sessionId);
+    return { state: "symptoms_reported" };
+  }
+
+  // `risk_category` carries this instrument's own vocabulary, as it does for
+  // the other two: 'none' / 'subthreshold' / 'moderate' / 'severe'.
+  const { error: saveError } = await admin.from("questionnaire_scores").upsert(
+    {
+      session_id: sessionId,
+      instrument: "ISI",
+      raw_answers: input,
+      score: result.score,
+      score_breakdown: {
+        breakdown: result.breakdown,
+        answeredCount: result.answeredCount,
+        incomplete: result.incomplete,
+        maxPossibleScore: result.maxPossibleScore,
+      },
+      risk_category: result.severity,
+      computed_by: "deterministic_engine",
+      computed_at: new Date().toISOString(),
+    },
+    { onConflict: "session_id,instrument" }
+  );
+
+  if (saveError) {
+    throw new Error(`Failed to save score: ${saveError.message}`);
+  }
+
+  return { state: "scored", result, input };
+}
+
+/**
+ * Removes this session's ISI score row, if there is one.
+ *
+ * Shared by the two "nothing to score" paths so they cannot drift apart. A
+ * delete that only ran on one of them would leave a stale total behind on the
+ * other, which is the precise failure this whole design is trying to avoid.
+ */
+async function clearIsiScore(admin: AdminClient, sessionId: string) {
+  const { error } = await admin
+    .from("questionnaire_scores")
+    .delete()
+    .eq("session_id", sessionId)
+    .eq("instrument", "ISI");
+
+  if (error) {
+    throw new Error(`Failed to clear ISI score: ${error.message}`);
+  }
 }

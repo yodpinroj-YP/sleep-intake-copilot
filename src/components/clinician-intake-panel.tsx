@@ -28,6 +28,13 @@ const ESS_SEVERITY_LABELS: Record<string, string> = {
   severe: "ง่วงรุนแรง",
 };
 
+const ISI_SEVERITY_LABELS: Record<string, string> = {
+  none: "ไม่เข้าเกณฑ์นอนไม่หลับ",
+  subthreshold: "นอนไม่หลับต่ำกว่าเกณฑ์",
+  moderate: "นอนไม่หลับระดับปานกลาง",
+  severe: "นอนไม่หลับระดับรุนแรง",
+};
+
 /**
  * Compact STOP-BANG breakdown: the eight letters, each showing whether it
  * scored, was answered-and-negative, or was never answered.
@@ -118,6 +125,54 @@ function EssBreakdown({
 }
 
 /**
+ * Compact ISI breakdown. Same idea as the ESS one, with two differences that
+ * matter: the scale runs 0–4 rather than 0–3, so there is one more shade, and
+ * the items come from three different response scales — which is why the
+ * tooltip carries the item's own wording rather than a shared legend.
+ */
+function IsiBreakdown({
+  items,
+}: {
+  items: {
+    field: string;
+    position: number;
+    label: string;
+    score: number | null;
+    answered: boolean;
+  }[];
+}) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((item) => {
+        const style = !item.answered
+          ? "bg-background text-muted-foreground/50 border-dashed border-muted-foreground/40"
+          : item.score === 0
+            ? "bg-background text-muted-foreground border-input"
+            : item.score === 1
+              ? "bg-foreground/15 text-foreground border-foreground/25"
+              : item.score === 2
+                ? "bg-foreground/35 text-foreground border-foreground/45"
+                : item.score === 3
+                  ? "bg-foreground/65 text-background border-foreground/70"
+                  : "bg-foreground text-background border-foreground";
+
+        return (
+          <span
+            key={item.field}
+            title={`${item.position}. ${item.label} — ${
+              item.answered ? `${item.score} คะแนน` : "ไม่ได้ตอบ"
+            }`}
+            className={`inline-flex h-6 w-6 items-center justify-center rounded border text-[11px] font-semibold tabular-nums ${style}`}
+          >
+            {item.answered ? item.score : "–"}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * The clinician's working list of patient intakes.
  *
  * Read-only on purpose. Acknowledging a flag and approving an AI summary are
@@ -142,8 +197,13 @@ export function ClinicianIntakePanel({
     <Card>
       <CardHeader>
         <CardTitle>Patient intakes</CardTitle>
+        {/* Names all three instruments on purpose. This line said "STOP-BANG
+            และ ESS" for a while after the ISI shipped, and a reader told at
+            the top of the page that there are two instruments stops looking
+            for a third — the ISI lines below were being missed entirely. A
+            label that undercounts what is on screen is worse than no label. */}
         <CardDescription>
-          แบบคัดกรองที่ผู้ป่วยส่งเข้ามา พร้อมคะแนน STOP-BANG และ ESS
+          แบบคัดกรองที่ผู้ป่วยส่งเข้ามา พร้อมคะแนน STOP-BANG, ESS และ ISI
           ที่คำนวณด้วยกฎตายตัว และสัญญาณเตือนที่ระบบตรวจพบ
         </CardDescription>
       </CardHeader>
@@ -158,6 +218,8 @@ export function ClinicianIntakePanel({
         {sessions.map((session) => {
           const risk = session.stopBang?.riskCategory ?? null;
           const essSeverity = session.ess?.severity ?? null;
+          const isiSeverity =
+            session.isi.state === "scored" ? session.isi.severity : null;
           const openFlags = session.flags.filter((f) => !f.acknowledgedAt);
 
           // An unacknowledged urgent flag gets a stronger treatment than a
@@ -222,6 +284,15 @@ export function ClinicianIntakePanel({
                         {ESS_SEVERITY_LABELS[essSeverity] ?? essSeverity}
                       </Badge>
                     )}
+                    {isiSeverity && isiSeverity !== "none" && (
+                      <Badge
+                        variant={
+                          isiSeverity === "severe" ? "destructive" : "secondary"
+                        }
+                      >
+                        {ISI_SEVERITY_LABELS[isiSeverity] ?? isiSeverity}
+                      </Badge>
+                    )}
                     <Badge variant="outline">
                       {session.status.replace("_", " ")}
                     </Badge>
@@ -283,6 +354,45 @@ export function ClinicianIntakePanel({
                 ) : (
                   <p className="text-muted-foreground">
                     ยังไม่ได้คำนวณคะแนน ESS — ผู้ป่วยยังไม่ได้ทำแบบประเมินความง่วง
+                  </p>
+                )}
+
+                {/* Four states, four different sentences. "Asked and reported
+                    none" is a finding and reads as one; "not asked" is a gap
+                    and reads as one. Collapsing them would discard the answer
+                    the screening question exists to collect. */}
+                {session.isi.state === "scored" ? (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="font-medium tabular-nums">
+                        ISI {session.isi.score} / 28
+                      </span>
+                      {session.isi.incomplete && (
+                        <span className="text-xs text-muted-foreground">
+                          ตอบ {session.isi.answeredCount} จาก 7 ข้อ —
+                          คะแนนนี้เป็นค่าต่ำสุด อาจสูงได้ถึง{" "}
+                          <strong className="tabular-nums">
+                            {session.isi.maxPossibleScore}
+                          </strong>{" "}
+                          เมื่อตอบครบ
+                        </span>
+                      )}
+                    </div>
+                    <IsiBreakdown items={session.isi.breakdown} />
+                  </div>
+                ) : session.isi.state === "no_symptoms" ? (
+                  <p className="text-muted-foreground">
+                    ISI — คัดกรองแล้ว ผู้ป่วยรายงานว่าไม่มีอาการนอนไม่หลับ
+                    จึงไม่ได้ทำแบบประเมินชุดนี้
+                  </p>
+                ) : session.isi.state === "symptoms_reported" ? (
+                  <p className="text-muted-foreground">
+                    ISI — ผู้ป่วยรายงานว่า<strong>มี</strong>ปัญหาการนอนหลับ
+                    แต่ยังตอบแบบประเมินไม่เสร็จ
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">
+                    ISI — ยังไม่ได้ถามคำถามคัดกรอง
                   </p>
                 )}
 

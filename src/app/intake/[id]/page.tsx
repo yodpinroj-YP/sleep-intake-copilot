@@ -2,11 +2,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { EssForm } from "@/components/ess-form";
+import { IsiForm } from "@/components/isi-form";
 import { StopBangForm } from "@/components/stopbang-form";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import {
   getEssAnswers,
+  getIsiAnswers,
   getMyIntakeSession,
   getStopBangAnswers,
 } from "@/services/intake/service";
@@ -53,6 +55,7 @@ export default async function IntakePage({
   // cost one extra round trip and stay honest.
   const answers = await getStopBangAnswers(supabase, id);
   const essAnswers = await getEssAnswers(supabase, id);
+  const isi = await getIsiAnswers(supabase, id);
 
   const isOpen =
     session.status === "not_started" || session.status === "in_progress";
@@ -74,8 +77,9 @@ export default async function IntakePage({
       {isOpen ? (
         <>
           <p className="text-sm text-muted-foreground">
-            แบบสอบถามมี 2 ชุด ชุดแรกคัดกรองภาวะหยุดหายใจขณะหลับ
-            ชุดที่สองประเมินความง่วงกลางวัน แต่ละชุดบันทึกแยกกัน
+            แบบสอบถามมี 3 ชุด ชุดแรกคัดกรองภาวะหยุดหายใจขณะหลับ
+            ชุดที่สองประเมินความง่วงกลางวัน ชุดที่สามเริ่มด้วยคำถามเดียว
+            และจะถามต่อเฉพาะผู้ที่มีปัญหานอนไม่หลับ แต่ละชุดบันทึกแยกกัน
             ทำชุดไหนก่อนก็ได้ และกลับมาทำต่อภายหลังได้
           </p>
 
@@ -90,6 +94,12 @@ export default async function IntakePage({
           />
 
           <EssForm sessionId={session.id} initialAnswers={essAnswers} />
+
+          <IsiForm
+            sessionId={session.id}
+            initialHasSleepDifficulty={isi.hasSleepDifficulty}
+            initialAnswers={isi.answers}
+          />
         </>
       ) : (
         <p className="text-sm text-muted-foreground">

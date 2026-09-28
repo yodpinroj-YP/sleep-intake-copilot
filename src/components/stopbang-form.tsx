@@ -39,11 +39,13 @@ function YesNo({
   name,
   value,
   onChange,
+  onClear,
   disabled,
 }: {
   name: string;
-  value: boolean | undefined;
+  value: boolean | null | undefined;
   onChange: (next: boolean) => void;
+  onClear: () => void;
   disabled?: boolean;
 }) {
   const options: { label: string; val: boolean }[] = [
@@ -52,7 +54,7 @@ function YesNo({
   ];
 
   return (
-    <div className="flex gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {options.map((opt) => {
         const id = `${name}-${opt.val}`;
         const selected = value === opt.val;
@@ -80,6 +82,20 @@ function YesNo({
           </div>
         );
       })}
+
+      {/* Radio buttons change but never clear, and on this questionnaire an
+          unanswered item is reported to the clinician differently from a
+          "no". A patient who taps the wrong one needs a way back. */}
+      {typeof value === "boolean" && (
+        <button
+          type="button"
+          onClick={onClear}
+          disabled={disabled}
+          className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+        >
+          ล้างคำตอบข้อนี้
+        </button>
+      )}
     </div>
   );
 }
@@ -113,7 +129,7 @@ export function StopBangForm({
   const [dateOfBirth, setDateOfBirth] = useState(initialDateOfBirth ?? "");
   const [sex, setSex] = useState<Sex | "">(initialSex ?? "");
 
-  const [answers, setAnswers] = useState<Record<string, boolean | undefined>>(
+  const [answers, setAnswers] = useState<Record<string, boolean | null | undefined>>(
     () => ({ ...initialAnswers })
   );
 
@@ -343,6 +359,9 @@ export function StopBangForm({
                   name={q.key}
                   value={answers[q.key]}
                   disabled={isPending}
+                  onClear={() =>
+                    setAnswers((prev) => ({ ...prev, [q.key]: null }))
+                  }
                   onChange={(next) =>
                     setAnswers((prev) => ({ ...prev, [q.key]: next }))
                   }

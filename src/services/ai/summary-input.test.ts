@@ -21,6 +21,17 @@ import {
  */
 
 const SOURCE: SummarySource = {
+  // Screened out rather than scored: this fixture doubles as the check that a
+  // screened-out ISI carries no item text into the payload.
+  isi: {
+    screenedOut: true,
+    score: null,
+    maxPossibleScore: null,
+    incomplete: false,
+    answeredCount: 0,
+    severity: null,
+    items: [],
+  },
   ageYears: 58,
   sex: "male",
   bmi: 36.24,
@@ -87,11 +98,16 @@ describe("payload contents", () => {
   it("carries exactly the allowed fields and no others", () => {
     const input = buildSummaryInput(SOURCE);
 
+    // Updating this list is the deliberate act that lets a new field reach the
+    // model. It caught `isi` on the day that field was added, which is the
+    // only reason the assertion is written as an exact set rather than a
+    // subset check.
     assert.deepEqual(Object.keys(input).sort(), [
       "ageBand",
       "bmi",
       "ess",
       "flags",
+      "isi",
       "neckCircumferenceCm",
       "sex",
       "stopBang",
@@ -110,6 +126,15 @@ describe("payload contents", () => {
     assert.equal(input.ess?.score, 17);
     assert.equal(input.ess?.severity, "severe");
     assert.equal(input.flags.length, 1);
+  });
+
+  it("tells the model that a screened-out ISI was asked, not skipped", () => {
+    const input = buildSummaryInput(SOURCE);
+    assert.equal(input.isi?.screenedOut, true);
+    assert.equal(input.isi?.score, null);
+    // A screened-out instrument carries no items, so no item wording reaches
+    // the prompt for a questionnaire the patient never saw.
+    assert.equal(input.isi?.items.length, 0);
   });
 
   it("ignores extra fields a caller passes by mistake", () => {

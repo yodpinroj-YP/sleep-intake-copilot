@@ -97,10 +97,15 @@ export async function POST(
       ? (body.answers as Record<string, unknown>)
       : {};
 
-  const answers: Record<string, boolean> = {};
+  const answers: Record<string, boolean | null> = {};
   for (const key of STOPBANG_QUESTION_KEYS) {
-    if (typeof rawAnswers[key] === "boolean") {
-      answers[key] = rawAnswers[key] as boolean;
+    const value = rawAnswers[key];
+    if (typeof value === "boolean") {
+      answers[key] = value;
+    } else if (value === null) {
+      // An explicit null retracts a stored yes/no. Anything else (a key the
+      // form did not send at all) is left alone.
+      answers[key] = null;
     }
   }
 

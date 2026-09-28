@@ -32,15 +32,17 @@ function ScaleChoice({
   name,
   value,
   onChange,
+  onClear,
   disabled,
 }: {
   name: string;
-  value: number | undefined;
+  value: number | null | undefined;
   onChange: (next: number) => void;
+  onClear: () => void;
   disabled?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {ESS_OPTIONS.map((opt) => {
         const id = `${name}-${opt.value}`;
         const selected = value === opt.value;
@@ -70,6 +72,21 @@ function ScaleChoice({
           </div>
         );
       })}
+
+      {/* A radio group can change its answer but never go back to having
+          none, and on this questionnaire "not answered" is a real state that
+          the score reports differently from a 0. Without this, a mis-tap
+          becomes a clinical answer the patient cannot take back. */}
+      {typeof value === "number" && (
+        <button
+          type="button"
+          onClick={onClear}
+          disabled={disabled}
+          className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+        >
+          ล้างคำตอบข้อนี้
+        </button>
+      )}
     </div>
   );
 }
@@ -95,9 +112,17 @@ function ScaleChoice({
 export function EssForm({ sessionId, initialAnswers }: EssFormProps) {
   const router = useRouter();
 
-  const [answers, setAnswers] = useState<Record<string, number | undefined>>(
-    () => ({ ...initialAnswers })
-  );
+  /**
+   * undefined — never touched, so the request omits the key entirely.
+   * null     — cleared on purpose, sent so the server deletes the stored row.
+   * number   — an answer.
+   *
+   * JSON.stringify drops undefined and keeps null, which is exactly the
+   * distinction the save layer needs.
+   */
+  const [answers, setAnswers] = useState<
+    Record<string, number | null | undefined>
+  >(() => ({ ...initialAnswers }));
 
   const [error, setError] = useState<string | null>(null);
   const [confirmPartial, setConfirmPartial] = useState(false);
@@ -232,6 +257,11 @@ export function EssForm({ sessionId, initialAnswers }: EssFormProps) {
                 name={q.key}
                 value={answers[q.key]}
                 disabled={isPending}
+                onClear={() => {
+                  setAnswers((prev) => ({ ...prev, [q.key]: null }));
+                  setConfirmPartial(false);
+                  setError(null);
+                }}
                 onChange={(next) => {
                   setAnswers((prev) => ({ ...prev, [q.key]: next }));
                   // Any new answer invalidates a pending "submit anyway":

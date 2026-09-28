@@ -59,7 +59,7 @@ export async function POST(
       ? (body.answers as Record<string, unknown>)
       : {};
 
-  const answers: Record<string, number> = {};
+  const answers: Record<string, number | null> = {};
 
   for (const key of ESS_QUESTION_KEYS) {
     const parsed = parseItemAnswer(rawAnswers[key]);
@@ -71,9 +71,10 @@ export async function POST(
       );
     }
 
-    if (parsed !== null) {
-      answers[key] = parsed;
-    }
+    // null is carried through rather than dropped: it means the patient
+    // cleared this item, and the save layer removes the stored answer. See
+    // saveStructuredResponses and migration 0008.
+    answers[key] = parsed;
   }
 
   let session;
