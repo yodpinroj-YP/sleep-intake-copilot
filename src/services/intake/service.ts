@@ -9,6 +9,11 @@ import {
   ISI_SCREENING_QUESTION_KEY,
 } from "@/lib/isi";
 import { STOPBANG_DOMAIN, STOPBANG_QUESTION_KEYS } from "@/lib/stopbang";
+import {
+  recordAuditEvents,
+  tryRecordAuditEvents,
+} from "@/services/audit/audit-log";
+import type { AuditEvent } from "@/services/audit/audit-events.ts";
 import type { Database, ReviewStatus } from "@/types/database.types";
 
 /**
@@ -100,15 +105,38 @@ export async function deleteIntakeSession(
   patientId: string,
   sessionId: string
 ) {
-  const { error } = await supabase
+  // `.select()` again, for the same reason as in saveStructuredResponses: a
+  // delete that RLS refuses reports success and removes nothing, and a patient
+  // told their session was deleted while it still exists is the worst of both
+  // answers. It also gives the audit event something true to say about what
+  // was removed — after the row is gone there is nothing left to read.
+  const { data: deleted, error } = await supabase
     .from("intake_sessions")
     .delete()
     .eq("id", sessionId)
-    .eq("patient_id", patientId);
+    .eq("patient_id", patientId)
+    .select("id, status");
 
   if (error) {
     throw new Error(`Failed to delete intake session: ${error.message}`);
   }
+
+  if (!deleted || deleted.length === 0) {
+    throw new Error("ลบแบบสอบถามไม่สำเร็จ — อาจถูกลบไปแล้ว หรือส่งให้แพทย์แล้ว");
+  }
+
+  await recordAuditEvents([
+    {
+      action: "session_deleted",
+      actorId: patientId,
+      actorRole: "patient",
+      patientId,
+      sessionId,
+      entityTable: "intake_sessions",
+      entityId: sessionId,
+      details: { sessionStatus: deleted[0].status },
+    },
+  ]);
 }
 
 /**
@@ -190,8 +218,10 @@ export async function getStopBangAnswers(
  */
 async function saveStructuredResponses(
   supabase: TypedSupabaseClient,
+  patientId: string,
   sessionId: string,
   domain: string,
+  instrument: "STOP_BANG" | "ESS" | "ISI",
   questionKeys: readonly string[],
   answers: Record<string, unknown>
 ): Promise<void> {
@@ -207,6 +237,12 @@ async function saveStructuredResponses(
 
   const existingByKey = new Map(
     (existing ?? []).map((row) => [row.question_key, row.id])
+  );
+
+  // The reverse direction, so a retraction can be logged by question key
+  // rather than by row id — an id means nothing to whoever reads the log.
+  const existingIdToKey = new Map(
+    (existing ?? []).map((row) => [row.id, row.question_key])
   );
 
   const toInsert: {
@@ -259,14 +295,35 @@ async function saveStructuredResponses(
     }
   }
 
+  let retractedCount = 0;
+
   if (toDelete.length > 0) {
-    const { error } = await supabase
+    // `.select()` on a delete returns the rows that were actually removed, and
+    // that is the point of it here rather than a flourish.
+    //
+    // When RLS refuses a delete it does not raise — it removes nothing and
+    // reports success. Without this count, a missing delete policy would look
+    // exactly like a successful retraction: the patient would be told their
+    // answer was cleared, the answer would still be in the database, and it
+    // would still be counted in a clinical score. Comparing the counts turns
+    // that silent failure into a loud one.
+    const { data: deleted, error } = await supabase
       .from("intake_responses")
       .delete()
-      .in("id", toDelete);
+      .in("id", toDelete)
+      .select("id");
 
     if (error) {
       throw new Error(`Failed to clear answers: ${error.message}`);
+    }
+
+    retractedCount = deleted?.length ?? 0;
+
+    if (retractedCount !== toDelete.length) {
+      throw new Error(
+        `ลบคำตอบไม่สำเร็จ (${retractedCount} จาก ${toDelete.length}) — ` +
+          `กรุณาลองใหม่อีกครั้ง หากยังไม่ได้โปรดแจ้งผู้ดูแลระบบ`
+      );
     }
   }
 
@@ -277,6 +334,52 @@ async function saveStructuredResponses(
       throw new Error(`Failed to save answers: ${error.message}`);
     }
   }
+
+  // Logged after the writes, so what is recorded is what actually happened.
+  // A retraction gets an event of its own rather than a field on the save:
+  // "data was removed" is the question an audit log is asked, and it should
+  // not require reading a count out of another event to answer it.
+  const events: AuditEvent[] = [];
+
+  if (toInsert.length > 0 || toDelete.length === 0) {
+    events.push({
+      action: "answers_saved",
+      actorId: patientId,
+      actorRole: "patient",
+      patientId,
+      sessionId,
+      entityTable: "intake_responses",
+      entityId: null,
+      details: {
+        instrument,
+        answeredCount: toInsert.length,
+      },
+    });
+  }
+
+  if (retractedCount > 0) {
+    events.push({
+      action: "answer_retracted",
+      actorId: patientId,
+      actorRole: "patient",
+      patientId,
+      sessionId,
+      entityTable: "intake_responses",
+      entityId: null,
+      details: {
+        instrument,
+        retractedCount,
+        // Which questions, not what they said. The keys are field names from
+        // src/lib/*.ts, so this tells a reviewer that item 2 of the ISI was
+        // withdrawn without telling them what the answer had been.
+        questionKeys: toDelete
+          .map((id) => existingIdToKey.get(id))
+          .filter((key): key is string => typeof key === "string"),
+      },
+    });
+  }
+
+  await recordAuditEvents(events);
 }
 
 export interface StopBangIntakeInput {
@@ -352,8 +455,10 @@ export async function saveStopBangIntake(
   // 3. The four questionnaire answers.
   await saveStructuredResponses(
     supabase,
+    userId,
     sessionId,
     STOPBANG_DOMAIN,
+    "STOP_BANG",
     STOPBANG_QUESTION_KEYS,
     input.answers
   );
@@ -439,8 +544,10 @@ export async function saveEssIntake(
 
   await saveStructuredResponses(
     supabase,
+    userId,
     sessionId,
     ESS_DOMAIN,
+    "ESS",
     ESS_QUESTION_KEYS,
     input.answers
   );
@@ -536,10 +643,18 @@ export async function saveIsiIntake(
     ? [ISI_SCREENING_QUESTION_KEY, ...ISI_QUESTION_KEYS]
     : [ISI_SCREENING_QUESTION_KEY];
 
-  await saveStructuredResponses(supabase, sessionId, ISI_DOMAIN, keys, {
-    ...input.answers,
-    [ISI_SCREENING_QUESTION_KEY]: input.hasSleepDifficulty,
-  });
+  await saveStructuredResponses(
+    supabase,
+    userId,
+    sessionId,
+    ISI_DOMAIN,
+    "ISI",
+    keys,
+    {
+      ...input.answers,
+      [ISI_SCREENING_QUESTION_KEY]: input.hasSleepDifficulty,
+    }
+  );
 
   return session;
 }
@@ -734,9 +849,28 @@ function readScoreBreakdown<T>(value: unknown): {
  *
  * RLS still governs every one of them: a patient calling this would get back
  * only their own rows, and only a clinician sees other patients' data.
+ *
+ * THE VIEWER IS A REQUIRED ARGUMENT, NOT A CONVENIENCE.
+ *
+ * Reading this queue means seeing other people's clinical data, and since 0009
+ * that read is recorded. Taking the viewer as a parameter is what makes it
+ * impossible to call this without saying who is calling — the alternative,
+ * logging from the page that happens to call it, leaves the next caller free
+ * to forget. One `record_viewed` row is written per patient returned, because
+ * "who saw this patient's record" is the question, and a single row saying
+ * "the queue was opened" cannot answer it.
+ *
+ * IN TODAY'S INTERFACE THE QUEUE IS THE RECORD VIEW. There is no per-patient
+ * page; the dashboard renders every session's scores, breakdowns and flags at
+ * once. So opening the dashboard genuinely is reading everyone's record, and
+ * the log says so. When the queue grows past a screenful it should be
+ * paginated or filtered — not to reduce logging, but because at that point a
+ * clinician opening a list is no longer meaningfully reading four hundred
+ * records, and the log would be claiming they did.
  */
 export async function listIntakeSessionsForReview(
   supabase: TypedSupabaseClient,
+  viewer: { id: string; role: string | null },
   limit = 50
 ): Promise<ClinicianSessionView[]> {
   const { data: sessions, error } = await supabase
@@ -817,6 +951,29 @@ export async function listIntakeSessionsForReview(
     flagsBySession.set(flag.session_id, list);
   }
 
+  // Recorded before the rows are handed back, so the log is written for what
+  // was actually read rather than for what a caller went on to render.
+  //
+  // tryRecord, not record: if the audit table is unreachable this logs loudly
+  // to the server console and the queue still loads. A clinician locked out of
+  // the list cannot see an urgent drowsy-driving flag, and no bookkeeping is
+  // worth that. See the note on tryRecordAuditEvents.
+  await tryRecordAuditEvents(
+    sessions.map((session) => ({
+      action: "record_viewed" as const,
+      actorId: viewer.id,
+      actorRole: viewer.role,
+      patientId: session.patient_id,
+      sessionId: session.id,
+      entityTable: "intake_sessions",
+      entityId: session.id,
+      details: {
+        sessionStatus: session.status,
+        recordCount: sessions.length,
+      },
+    }))
+  );
+
   return sessions.map((session) => {
     const score = stopBangBySession.get(session.id);
     const breakdown = score
@@ -894,6 +1051,7 @@ export async function listPendingClinicianSummaries(
 export async function reviewClinicianSummary(
   supabase: TypedSupabaseClient,
   clinicianId: string,
+  clinicianRole: string | null,
   summaryId: string,
   decision: Extract<ReviewStatus, "approved" | "rejected">
 ) {
@@ -911,6 +1069,37 @@ export async function reviewClinicianSummary(
   if (error) {
     throw new Error(`Failed to review clinician summary: ${error.message}`);
   }
+
+  // The reason this whole table exists, in one call.
+  //
+  // `clinician_summaries` keeps only the newest decision: approve, then reject,
+  // and the approval is gone, along with the time it happened. This row is
+  // what survives. Note that the reviewer's notes are NOT logged — they are
+  // free clinical text, they live in the record where they belong, and the
+  // audit log's job is to say a decision was made, not to hold a second copy
+  // of what was said.
+  const { data: patient } = await supabase
+    .from("intake_sessions")
+    .select("patient_id")
+    .eq("id", data.session_id)
+    .single();
+
+  await recordAuditEvents([
+    {
+      action: decision === "approved" ? "summary_approved" : "summary_rejected",
+      actorId: clinicianId,
+      actorRole: clinicianRole,
+      patientId: patient?.patient_id ?? null,
+      sessionId: data.session_id,
+      entityTable: "clinician_summaries",
+      entityId: summaryId,
+      details: {
+        decision,
+        summaryVersion: data.version,
+        model: data.model,
+      },
+    },
+  ]);
 
   return data;
 }

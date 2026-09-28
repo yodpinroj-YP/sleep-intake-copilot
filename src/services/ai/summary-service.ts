@@ -132,6 +132,15 @@ export interface GenerateSummaryOutcome {
   draft: SummaryDraft;
   model: string;
   promptVersion: string;
+  /**
+   * Whose record this draft is about.
+   *
+   * Returned so the caller can write an audit row naming the patient. The
+   * route knows the session id but not the patient behind it, and looking it
+   * up a second time would be a second query for something this function has
+   * already read.
+   */
+  patientId: string;
 }
 
 export async function generateSummaryForSession(
@@ -367,5 +376,6 @@ export async function generateSummaryForSession(
     draft,
     model: modelName,
     promptVersion: PROMPT_VERSION,
+    patientId: session.patient_id,
   };
 }

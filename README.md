@@ -31,13 +31,13 @@ If the model is wrong, it is wrong about the prose — never about the number.
 | Area | Status |
 | --- | --- |
 | Patient intake, three questionnaires | STOP-BANG (8 items), ESS (8 items), ISI (7 items, asked only when a screening question says to) |
-| Deterministic scoring | Server-side, 99 tests, never an LLM |
+| Deterministic scoring | Server-side, 107 tests, never an LLM |
 | Safety flags | Two severities; drowsy-driving fires as `urgent` on one item, independent of the total |
 | Incomplete data | Reported as a floor with a stated ceiling, never as a conclusion |
 | AI summary | Drafted on request, always lands `pending_review` |
 | Clinician review | Approve/reject recorded with reviewer and timestamp |
 | Public demo | `/demo/clinician` — the real components, fabricated data, no database access |
-| Roles | `patient`, `nurse`, `physician`, `admin` — 23 access-control tests hold the boundary |
+| Roles | `patient`, `nurse`, `physician`, `admin` — 28 access-control tests hold the boundary |
 
 ## Rules this project follows
 
@@ -91,6 +91,10 @@ If the model is wrong, it is wrong about the prose — never about the number.
 11. **A truncated or unparseable AI reply is discarded, not stored** — a
    half-written summary looks like a real one, which makes it the most
    dangerous of the possible failures.
+12. **The record of what happened cannot be edited by the thing that
+   happened** — `audit_log` accepts inserts and nothing else. UPDATE and
+   DELETE raise, service role included, and no signed-in account can read it
+   at all. See `docs/audit-log.md` for the three decisions behind that.
 
 ## Project structure
 
@@ -123,6 +127,8 @@ src/
     ai/summary-prompt.ts                        # Prompt + response parser
     ai/gemini.ts                                # The only file that calls a model
     ai/summary-service.ts                       # Gathers, asks, validates, files
+    audit/audit-events.ts                       # Action list + detail allowlist, no imports
+    audit/audit-log.ts                          # The only writer, service-role, server-only
 supabase/migrations/
   0001_init.sql                 # 7 tables, enums, RLS policies
   0002_intake_session_delete_policy.sql
@@ -131,6 +137,8 @@ supabase/migrations/
   0005_profiles_column_privileges.sql  # a patient cannot change their own role
   0006_add_role_values.sql      # nurse, physician (run alone — see the file)
   0007_physician_only_decisions.sql  # is_physician() guards the two decisions
+  0008_intake_response_delete_policy.sql  # a patient may retract an answer
+  0009_audit_log.sql            # append-only; no read policy by design
 tests/rls/
   access-control.test.ts        # What each role can and cannot see
 scripts/
@@ -144,7 +152,7 @@ scripts/
 npm test
 ```
 
-99 tests, run with Node's built-in test runner. They cover the scoring rules
+107 tests, run with Node's built-in test runner. They cover the scoring rules
 of all three instruments, the safety-flag rules, the de-identification
 allowlist and guard, and the parser that decides whether a model's reply is
 fit to store.
@@ -159,7 +167,7 @@ never be hidden behind a mock.
 npm run test:rls
 ```
 
-23 tests that sign in as two patients, a nurse and a physician against a
+28 tests that sign in as two patients, a nurse and a physician against a
 real database and assert what each one can and cannot see: that a patient
 cannot read another patient's session, scores or safety flags; that a
 signed-out visitor sees nothing; that a patient cannot write their own score,
@@ -167,7 +175,9 @@ raise their own safety flag, or approve an AI draft; that a nurse can read
 everything but can neither approve a draft nor acknowledge a flag; that
 neither a patient nor a nurse can change their own role; and that a patient
 can retract an answer on their own open session but not on a completed one,
-and never on anybody else's.
+and never on anybody else's; and that nobody at all — patient, nurse or
+physician — can read the audit log, which not even the service role can edit
+or delete.
 
 RLS is evaluated by Postgres, not by this codebase, so reading the policies
 proves nothing — the only honest test asks the database. The first run of this
@@ -250,8 +260,17 @@ Before a single real patient, this must move to a paid endpoint that does not
 train on submitted data. The de-identification described in rule 8 is what
 makes that transition a configuration change rather than a redesign.
 
-**No `audit_log` or `consents` table yet.** Both are required before real
-clinical use — see `docs/hospital-integration.md`.
+**The audit log is not yet transactional.** `audit_log` exists and records
+reads, decisions, saves, retractions and deletions — but each row is written
+as a second statement rather than inside the caller's transaction, so a
+decision that succeeds and then fails to log leaves the log a row short. The
+caller is told; the database is briefly inconsistent with its own history.
+Closing this means moving each decision into a database function. It should
+happen before a real patient, and `docs/audit-log.md` records it as the next
+step on this table rather than leaving it to be discovered.
+
+**No `consents` table yet.** Required before real clinical use — see
+`docs/hospital-integration.md`.
 
 **No caregiver access yet.** The nurse/physician split is built and tested;
 caregivers are not. A relative who legitimately fills in the questionnaire

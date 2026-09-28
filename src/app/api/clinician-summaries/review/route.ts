@@ -36,8 +36,24 @@ export async function POST(request: Request) {
     );
   }
 
+  // Read for the audit log, not for authorization — RLS and the column grants
+  // in 0001/0007 are what actually decide whether this write is allowed. What
+  // the log needs is the role the actor held at the moment they decided, which
+  // is not recoverable later if the account is changed or removed.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+
   try {
-    const summary = await reviewClinicianSummary(supabase, user.id, body.id, body.decision);
+    const summary = await reviewClinicianSummary(
+      supabase,
+      user.id,
+      profile?.role ?? null,
+      body.id,
+      body.decision
+    );
     return NextResponse.json({ summary });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Review failed";

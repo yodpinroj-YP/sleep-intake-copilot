@@ -36,7 +36,14 @@ export default async function DashboardPage() {
   const [pendingSummaries, intakesForReview] = onCareTeam
     ? await Promise.all([
         listPendingClinicianSummaries(supabase),
-        listIntakeSessionsForReview(supabase),
+        // The viewer is passed so the read can be recorded against a person.
+        // `role` is the one read back from profiles above, which a patient
+        // cannot edit — so what lands in the audit log is the role the
+        // database believes this account held at the moment it looked.
+        listIntakeSessionsForReview(supabase, {
+          id: user.id,
+          role: profile?.role ?? null,
+        }),
       ])
     : [[], []];
 

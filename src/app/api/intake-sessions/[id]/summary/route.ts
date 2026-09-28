@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { createClient } from "@/lib/supabase/server";
 import { isCareTeam } from "@/lib/roles";
+import { recordAuditEvents } from "@/services/audit/audit-log";
 import { generateSummaryForSession } from "@/services/ai/summary-service";
 
 /**
@@ -66,6 +67,27 @@ export async function POST(
 
   try {
     const outcome = await generateSummaryForSession(id);
+
+    // Logged only on success. A request that failed produced no draft and read
+    // no record, so recording it here would put an event in the log for
+    // something that did not happen — `ai_processing_logs` already exists for
+    // the technical question of which calls errored.
+    await recordAuditEvents([
+      {
+        action: "summary_requested",
+        actorId: user.id,
+        actorRole: profile?.role ?? null,
+        patientId: outcome.patientId,
+        sessionId: id,
+        entityTable: "clinician_summaries",
+        entityId: outcome.summaryId,
+        details: {
+          model: outcome.model,
+          summaryVersion: outcome.version,
+        },
+      },
+    ]);
+
     return NextResponse.json({ summary: outcome });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Generation failed";

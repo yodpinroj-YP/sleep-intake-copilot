@@ -28,6 +28,20 @@ export type ReviewStatus = "pending_review" | "approved" | "rejected";
 export type ResponseSource = "structured_choice" | "free_text" | "ai_extracted";
 export type FlagSeverity = "standard" | "urgent";
 export type QuestionnaireInstrument = "ESS" | "STOP_BANG" | "ISI" | "BERLIN";
+/**
+ * Mirrors the check constraint on audit_log.action in 0009_audit_log.sql.
+ * The canonical list — the one that actually refuses an unknown value — is
+ * the constraint; `AUDIT_ACTIONS` in src/services/audit/audit-events.ts is
+ * the third copy, and a test asserts the two TypeScript copies agree.
+ */
+export type AuditActionName =
+  | "record_viewed"
+  | "summary_requested"
+  | "summary_approved"
+  | "summary_rejected"
+  | "answers_saved"
+  | "answer_retracted"
+  | "session_deleted";
 export type AiProcessingFeature =
   | "nlu_extraction"
   | "adaptive_question_selection"
@@ -297,6 +311,39 @@ export interface Database {
           error_message?: string | null;
           created_at?: string;
         };
+        Relationships: [];
+      };
+      /**
+       * Append-only. There is no `Update` shape that the database will accept
+       * — 0009 installs triggers that raise on UPDATE and DELETE, service role
+       * included — so the types here say so rather than offering a call that
+       * always fails at runtime.
+       */
+      audit_log: {
+        Row: {
+          id: number;
+          occurred_at: string;
+          actor_id: string | null;
+          actor_role: UserRole | null;
+          action: AuditActionName;
+          patient_id: string | null;
+          session_id: string | null;
+          entity_table: string | null;
+          entity_id: string | null;
+          details: unknown;
+        };
+        Insert: {
+          occurred_at?: string;
+          actor_id?: string | null;
+          actor_role?: UserRole | null;
+          action: AuditActionName;
+          patient_id?: string | null;
+          session_id?: string | null;
+          entity_table?: string | null;
+          entity_id?: string | null;
+          details?: unknown;
+        };
+        Update: never;
         Relationships: [];
       };
     };

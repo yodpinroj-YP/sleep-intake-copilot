@@ -578,4 +578,140 @@ describe("Row Level Security", () => {
         "in the database."
     );
   });
+
+  // ------------------------------------------------------------- audit log
+
+  /**
+   * 0009 closes this table to the application twice over, and these tests are
+   * written to notice if either half is undone.
+   *
+   * First the table-level GRANTs are revoked from `anon` and `authenticated`,
+   * so PostgREST refuses the request outright — the error comes back before
+   * RLS is consulted at all. Then, underneath that, RLS is enabled with no
+   * policy, so even if a later migration re-granted SELECT the rows would
+   * still not be returned.
+   *
+   * The assertions below are therefore on the ROWS, not on the error. A
+   * permission error and an empty set are both correct answers to "can this
+   * account read the log"; insisting on one of them would make the test fail
+   * the day the other becomes true, which is what happened the first time
+   * these ran.
+   */
+
+  /**
+   * Proves the table is actually there before the three tests below claim
+   * nobody can read it.
+   *
+   * Without this, a database where 0009 was never run would pass all of them:
+   * PostgREST answers a missing table with an error and no rows, which is
+   * indistinguishable from a table that exists and refuses. Three green ticks
+   * for a table that does not exist is worse than a red one.
+   */
+  it("the audit log exists and the service role can read it", async () => {
+    const { error } = await admin.from("audit_log").select("id").limit(1);
+
+    assert.equal(
+      error,
+      null,
+      `Service role cannot read audit_log (${error?.message}). If this says ` +
+        `the relation does not exist, 0009_audit_log.sql has not been run ` +
+        `against this database and the tests below prove nothing.`
+    );
+  });
+
+  it("a patient cannot read the audit log", async () => {
+    const { data, error } = await alice.from("audit_log").select("id").limit(1);
+
+    assert.equal(
+      data?.length ?? 0,
+      0,
+      "A patient can read the audit log. It names every other patient whose " +
+        "record was opened, and by whom."
+    );
+
+    // Not required to pass, but reported when it does not hold, because the
+    // two refusals mean different things and it is worth knowing which one is
+    // in force: a permission error means the GRANTs are still revoked.
+    if (!error) {
+      console.warn(
+        "[rls] audit_log returned no error to a patient — the SELECT grant " +
+          "appears to have been restored, and only RLS is holding the line."
+      );
+    }
+  });
+
+  it("a nurse cannot read the audit log", async () => {
+    const { data } = await nurse.from("audit_log").select("id").limit(1);
+    assert.equal(data?.length ?? 0, 0);
+  });
+
+  it("a physician cannot read the audit log", async () => {
+    // Deliberate, and worth stating plainly: a physician has the widest access
+    // in this system to patient data, and none at all to the record of who
+    // used it. A log the people it watches can read is a log they can be
+    // tempted to argue with.
+    const { data } = await doctor.from("audit_log").select("id").limit(1);
+    assert.equal(data?.length ?? 0, 0);
+  });
+
+  it("nobody can rewrite history, not even the service role", async () => {
+    // The triggers in 0009 are what make "append-only" true rather than
+    // aspirational. RLS cannot deliver this on its own: the writer here IS
+    // the service role, and service role bypasses RLS entirely.
+    //
+    // This inserts a row of its own rather than reusing whatever happens to be
+    // in the table, so the test proves the same thing on an empty database as
+    // on a busy one. Writing a fabricated event into an audit log would be
+    // indefensible in production; it is fine here only because the guard at
+    // the top of this file refuses to run against any database holding an
+    // account outside @example.com, which makes every row in it synthetic.
+    //
+    // The row cannot be cleaned up afterwards. That is not an oversight — it
+    // is the property being tested.
+    const { data: inserted, error: insertError } = await admin
+      .from("audit_log")
+      .insert({
+        action: "record_viewed",
+        actor_id: nurseId,
+        actor_role: "nurse",
+        patient_id: aliceId,
+        session_id: aliceSession,
+        entity_table: "intake_sessions",
+        entity_id: aliceSession,
+        details: { recordCount: 1 },
+      })
+      .select("id")
+      .single();
+
+    assert.equal(
+      insertError,
+      null,
+      `Service role could not write to audit_log (${insertError?.message}). ` +
+        `Nothing in this application can record anything.`
+    );
+
+    const row = inserted!;
+
+    const { error: updateError } = await admin
+      .from("audit_log")
+      // The generated types declare `Update: never` for this table precisely
+      // because the database refuses it. The cast is here so the test can
+      // prove at runtime what the types assert at compile time.
+      .update({ action: "record_viewed" } as never)
+      .eq("id", row.id);
+
+    const { error: deleteError } = await admin
+      .from("audit_log")
+      .delete()
+      .eq("id", row.id);
+
+    assert.ok(
+      updateError,
+      "An audit row was updated. A record that can be edited proves nothing."
+    );
+    assert.ok(
+      deleteError,
+      "An audit row was deleted. A record that can be removed proves nothing."
+    );
+  });
 });
