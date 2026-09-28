@@ -91,6 +91,8 @@ function Section({
 export function ClinicianReviewPanel({
   initialSummaries,
   readOnly = false,
+  readOnlyNote = "ในระบบจริง แพทย์จะเห็นปุ่มอนุมัติและปฏิเสธตรงนี้ และการตัดสินใจจะถูกบันทึกพร้อมชื่อผู้ตรวจและเวลา",
+  heading = "ร่างสรุปที่รอคุณตรวจสอบ",
 }: {
   initialSummaries: ClinicianSummary[];
   /**
@@ -104,6 +106,20 @@ export function ClinicianReviewPanel({
    * not a mock-up of it that can drift out of date.
    */
   readOnly?: boolean;
+  /**
+   * Why the controls are absent. There are two different reasons now — a
+   * visitor on the demo page has no account, and a nurse has an account that
+   * deliberately cannot approve — and telling someone the wrong one is worse
+   * than telling them nothing.
+   */
+  readOnlyNote?: string;
+  /**
+   * "รอคุณตรวจสอบ" is only true for the person who can act on it. A nurse
+   * sees this same queue and cannot approve anything in it, so telling them
+   * it waits on them is a small lie in a system whose whole argument is that
+   * the screen says plainly who is responsible for what.
+   */
+  heading?: string;
 }) {
   /**
    * Which summaries this clinician has just acted on.
@@ -149,7 +165,7 @@ export function ClinicianReviewPanel({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>ร่างสรุปที่รอคุณตรวจสอบ</CardTitle>
+        <CardTitle>{heading}</CardTitle>
         <CardDescription>
           ข้อความด้านล่างร่างโดย AI จากคะแนนที่ระบบคำนวณไว้แล้ว
           ยังไม่ถือเป็นส่วนหนึ่งของเวชระเบียนจนกว่าแพทย์จะกดอนุมัติ
@@ -210,8 +226,7 @@ export function ClinicianReviewPanel({
               <CardFooter className="flex-wrap gap-2">
                 {readOnly ? (
                   <span className="text-xs text-muted-foreground">
-                    ในระบบจริง แพทย์จะเห็นปุ่มอนุมัติและปฏิเสธตรงนี้
-                    และการตัดสินใจจะถูกบันทึกพร้อมชื่อผู้ตรวจและเวลา
+                    {readOnlyNote}
                   </span>
                 ) : (
                   <>

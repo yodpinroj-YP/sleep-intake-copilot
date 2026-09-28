@@ -37,7 +37,7 @@ If the model is wrong, it is wrong about the prose — never about the number.
 | AI summary | Drafted on request, always lands `pending_review` |
 | Clinician review | Approve/reject recorded with reviewer and timestamp |
 | Public demo | `/demo/clinician` — the real components, fabricated data, no database access |
-| Roles | `patient`, `nurse`, `physician`, `admin` — 20 access-control tests hold the boundary |
+| Roles | `patient`, `nurse`, `physician`, `admin` — 23 access-control tests hold the boundary |
 
 ## Rules this project follows
 
@@ -159,13 +159,15 @@ never be hidden behind a mock.
 npm run test:rls
 ```
 
-20 tests that sign in as two patients, a nurse and a physician against a
+23 tests that sign in as two patients, a nurse and a physician against a
 real database and assert what each one can and cannot see: that a patient
 cannot read another patient's session, scores or safety flags; that a
 signed-out visitor sees nothing; that a patient cannot write their own score,
 raise their own safety flag, or approve an AI draft; that a nurse can read
-everything but can neither approve a draft nor acknowledge a flag; and that
-neither a patient nor a nurse can change their own role.
+everything but can neither approve a draft nor acknowledge a flag; that
+neither a patient nor a nurse can change their own role; and that a patient
+can retract an answer on their own open session but not on a completed one,
+and never on anybody else's.
 
 RLS is evaluated by Postgres, not by this codebase, so reading the policies
 proves nothing — the only honest test asks the database. The first run of this
