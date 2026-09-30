@@ -31,13 +31,13 @@ If the model is wrong, it is wrong about the prose — never about the number.
 | Area | Status |
 | --- | --- |
 | Patient intake, three questionnaires | STOP-BANG (8 items), ESS (8 items), ISI (7 items, asked only when a screening question says to) |
-| Deterministic scoring | Server-side, 107 tests, never an LLM |
+| Deterministic scoring | Server-side, 114 tests, never an LLM |
 | Safety flags | Two severities; drowsy-driving fires as `urgent` on one item, independent of the total |
 | Incomplete data | Reported as a floor with a stated ceiling, never as a conclusion |
 | AI summary | Drafted on request, always lands `pending_review` |
 | Clinician review | Approve/reject recorded with reviewer and timestamp |
 | Public demo | `/demo/clinician` — the real components, fabricated data, no database access |
-| Roles | `patient`, `nurse`, `physician`, `admin` — 28 access-control tests hold the boundary |
+| Roles | `patient`, `nurse`, `physician`, `admin` — 35 access-control tests hold the boundary |
 
 ## Rules this project follows
 
@@ -91,7 +91,12 @@ If the model is wrong, it is wrong about the prose — never about the number.
 11. **A truncated or unparseable AI reply is discarded, not stored** — a
    half-written summary looks like a real one, which makes it the most
    dangerous of the possible failures.
-12. **The record of what happened cannot be edited by the thing that
+12. **Nothing is collected without a recorded, versioned consent** — health
+   data is sensitive personal data under section 26 of the PDPA. Three
+   purposes are recorded separately, each row stores the wording version the
+   patient agreed to, and withdrawal is a new row rather than an edit. See
+   `docs/consent.md`.
+13. **The record of what happened cannot be edited by the thing that
    happened** — `audit_log` accepts inserts and nothing else. UPDATE and
    DELETE raise, service role included, and no signed-in account can read it
    at all. See `docs/audit-log.md` for the three decisions behind that.
@@ -115,6 +120,7 @@ src/
     clinician-review-panel.tsx                  # AI drafts awaiting review
     generate-summary-button.tsx                 # Asks for a draft
   lib/
+    consent.ts                                  # The consent wording + version stamp, no imports
     roles.ts                                    # isCareTeam / isPhysician, for rendering only
     stopbang.ts, ess.ts, isi.ts                 # Item wording (see Licensing)
     supabase/admin.ts                           # Service-role client, server-only
@@ -129,6 +135,7 @@ src/
     ai/summary-service.ts                       # Gathers, asks, validates, files
     audit/audit-events.ts                       # Action list + detail allowlist, no imports
     audit/audit-log.ts                          # The only writer, service-role, server-only
+    consent/consent-service.ts                  # Reads, records and enforces consent
 supabase/migrations/
   0001_init.sql                 # 7 tables, enums, RLS policies
   0002_intake_session_delete_policy.sql
@@ -139,6 +146,8 @@ supabase/migrations/
   0007_physician_only_decisions.sql  # is_physician() guards the two decisions
   0008_intake_response_delete_policy.sql  # a patient may retract an answer
   0009_audit_log.sql            # append-only; no read policy by design
+  0010_consents.sql             # append-only consent, three purposes, versioned
+  0011_audit_consent_actions.sql  # widens the audit action list
 tests/rls/
   access-control.test.ts        # What each role can and cannot see
 scripts/
@@ -152,7 +161,7 @@ scripts/
 npm test
 ```
 
-107 tests, run with Node's built-in test runner. They cover the scoring rules
+114 tests, run with Node's built-in test runner. They cover the scoring rules
 of all three instruments, the safety-flag rules, the de-identification
 allowlist and guard, and the parser that decides whether a model's reply is
 fit to store.
@@ -167,7 +176,7 @@ never be hidden behind a mock.
 npm run test:rls
 ```
 
-28 tests that sign in as two patients, a nurse and a physician against a
+35 tests that sign in as two patients, a nurse and a physician against a
 real database and assert what each one can and cannot see: that a patient
 cannot read another patient's session, scores or safety flags; that a
 signed-out visitor sees nothing; that a patient cannot write their own score,
@@ -175,9 +184,11 @@ raise their own safety flag, or approve an AI draft; that a nurse can read
 everything but can neither approve a draft nor acknowledge a flag; that
 neither a patient nor a nurse can change their own role; and that a patient
 can retract an answer on their own open session but not on a completed one,
-and never on anybody else's; and that nobody at all — patient, nurse or
-physician — can read the audit log, which not even the service role can edit
-or delete.
+and never on anybody else's; that nobody at all — patient, nurse or physician
+— can read the audit log, which not even the service role can edit or delete;
+and that a patient can record consent only for themselves, that the care team
+can see whether consent exists without being able to change it, and that a
+recorded consent cannot be edited or deleted by anyone.
 
 RLS is evaluated by Postgres, not by this codebase, so reading the policies
 proves nothing — the only honest test asks the database. The first run of this
@@ -269,8 +280,10 @@ Closing this means moving each decision into a database function. It should
 happen before a real patient, and `docs/audit-log.md` records it as the next
 step on this table rather than leaving it to be discovered.
 
-**No `consents` table yet.** Required before real clinical use — see
-`docs/hospital-integration.md`.
+**The consent wording has not been reviewed by anyone but its author.** The
+table, the gates and the audit trail are built and tested (`docs/consent.md`),
+but the Thai and English text a patient will actually read must go to the
+hospital's data protection officer before a real patient sees it.
 
 **No caregiver access yet.** The nurse/physician split is built and tested;
 caregivers are not. A relative who legitimately fills in the questionnaire

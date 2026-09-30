@@ -14,6 +14,7 @@ import {
   tryRecordAuditEvents,
 } from "@/services/audit/audit-log";
 import type { AuditEvent } from "@/services/audit/audit-events.ts";
+import { assertRequiredConsent } from "@/services/consent/consent-service";
 import type { Database, ReviewStatus } from "@/types/database.types";
 
 /**
@@ -51,6 +52,17 @@ export async function createIntakeSession(
   supabase: TypedSupabaseClient,
   patientId: string
 ) {
+  // The gate, at the point where collection actually begins.
+  //
+  // It sits here rather than in the page or the route because this is the
+  // function that creates the container everything else is written into. A
+  // check in the interface can be bypassed by calling the API directly; a
+  // check here cannot be bypassed by any caller this application has.
+  //
+  // Throws rather than returning null: starting to collect health data without
+  // a recorded lawful basis is not a case to handle gracefully further up.
+  await assertRequiredConsent(supabase, patientId);
+
   const { data, error } = await supabase
     .from("intake_sessions")
     .insert({

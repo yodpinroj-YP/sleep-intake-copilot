@@ -33,6 +33,10 @@ export const AUDIT_ACTIONS = [
   "answer_retracted",
   /** A patient abandoned and deleted an intake session. */
   "session_deleted",
+  /** A patient gave consent for one purpose. */
+  "consent_granted",
+  /** A patient withdrew consent for one purpose. */
+  "consent_withdrawn",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -75,6 +79,15 @@ export const AUDIT_DETAIL_KEYS = [
   "screenedOut",
   /** The session's status at the moment of the action. */
   "sessionStatus",
+  /** 'care' | 'ai_summary' | 'research' — which consent was changed. */
+  "consentPurpose",
+  /**
+   * The version of the consent wording that was on screen.
+   *
+   * Without it the log records that consent changed but not what the patient
+   * was looking at when they changed it, which is most of the value.
+   */
+  "consentTextVersion",
 ] as const;
 
 export type AuditDetailKey = (typeof AUDIT_DETAIL_KEYS)[number];

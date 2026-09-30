@@ -109,6 +109,10 @@ describe("audit vocabulary", () => {
     // and AuditActionName in database.types.ts. The constraint is the one that
     // refuses bad data, so this test is here to make a disagreement fail in
     // CI rather than at 2am in production. Update all three together.
+    //
+    // The constraint now lives in 0011_audit_consent_actions.sql, which
+    // widened the one 0009 created — so the migration to read is the latest
+    // one that touches it, not the one that created the table.
     const inMigration = [
       "record_viewed",
       "summary_requested",
@@ -117,6 +121,8 @@ describe("audit vocabulary", () => {
       "answers_saved",
       "answer_retracted",
       "session_deleted",
+      "consent_granted",
+      "consent_withdrawn",
     ];
 
     assert.deepEqual([...AUDIT_ACTIONS].sort(), inMigration.sort());

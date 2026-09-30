@@ -714,4 +714,163 @@ describe("Row Level Security", () => {
       "An audit row was deleted. A record that can be removed proves nothing."
     );
   });
+
+  // -------------------------------------------------------------- consents
+
+  /**
+   * Consent is the lawful basis for holding any of the data the tests above
+   * are protecting, so the rules about who can write it matter as much as the
+   * rules about who can read the answers.
+   *
+   * These rows accumulate in the staging database and cannot be cleaned up.
+   * That is the property under test: 0010 refuses UPDATE and DELETE, service
+   * role included, because a consent record that can be rewritten cannot show
+   * what was agreed on the day the data was collected.
+   */
+
+  it("a patient can record their own consent", async () => {
+    const { error } = await alice.from("consents").insert({
+      patient_id: aliceId,
+      purpose: "research",
+      granted: true,
+      text_version: "rls-test",
+      recorded_by: aliceId,
+      source: "patient_web",
+    });
+
+    assert.equal(
+      error,
+      null,
+      `A patient could not record their own consent (${error?.message}). ` +
+        `Nobody can use the system.`
+    );
+  });
+
+  it("a patient cannot record consent on someone else's behalf", async () => {
+    // The insert policy pins patient_id to auth.uid(), so this is refused by
+    // the database rather than by the route remembering to check. Consent
+    // given by the wrong person is not consent.
+    const { error } = await alice.from("consents").insert({
+      patient_id: bobId,
+      purpose: "research",
+      granted: true,
+      text_version: "rls-test",
+      recorded_by: aliceId,
+      source: "patient_web",
+    });
+
+    assert.ok(
+      error,
+      "One patient recorded consent for another. Every row in this table " +
+        "would become a claim nobody can trust."
+    );
+  });
+
+  it("a patient cannot claim someone else pressed the button", async () => {
+    // patient_id is their own, but recorded_by is not. Allowing this would let
+    // a row say a caregiver or a nurse gave consent when the patient did.
+    const { error } = await alice.from("consents").insert({
+      patient_id: aliceId,
+      purpose: "research",
+      granted: true,
+      text_version: "rls-test",
+      recorded_by: bobId,
+      source: "patient_web",
+    });
+
+    assert.ok(error, "A consent row was attributed to the wrong person.");
+  });
+
+  it("a patient cannot read another patient's consents", async () => {
+    const { data } = await alice
+      .from("consents")
+      .select("id")
+      .eq("patient_id", bobId);
+
+    assert.equal(data?.length ?? 0, 0);
+  });
+
+  it("the care team can see whether a patient consented", async () => {
+    // A clinician needs to know why an AI draft is unavailable for one patient
+    // and offered for another. They see the fact, and have no policy that lets
+    // them change it.
+    const { data, error } = await doctor
+      .from("consents")
+      .select("id, purpose, granted")
+      .eq("patient_id", aliceId);
+
+    assert.equal(error, null);
+    assert.ok(
+      (data?.length ?? 0) > 0,
+      "A physician cannot see the patient's consent, so the interface cannot " +
+        "explain why the AI draft is unavailable."
+    );
+  });
+
+  it("a consent, once recorded, cannot be edited or deleted by anyone", async () => {
+    const { data: row, error: insertError } = await admin
+      .from("consents")
+      .insert({
+        patient_id: aliceId,
+        purpose: "ai_summary",
+        granted: true,
+        text_version: "rls-test",
+        recorded_by: aliceId,
+        source: "staff_entry",
+      })
+      .select("id")
+      .single();
+
+    assert.equal(insertError, null, `Seeding a consent failed: ${insertError?.message}`);
+
+    const { error: updateError } = await admin
+      .from("consents")
+      .update({ granted: false } as never)
+      .eq("id", row!.id);
+
+    const { error: deleteError } = await admin
+      .from("consents")
+      .delete()
+      .eq("id", row!.id);
+
+    assert.ok(
+      updateError,
+      "A consent row was edited. Withdrawal must be a new row, or the record " +
+        "shows only what is true now rather than what was agreed then."
+    );
+    assert.ok(deleteError, "A consent row was deleted.");
+  });
+
+  it("current_consents shows the newest answer and hides other patients", async () => {
+    // Withdrawal is an insert, so the view is what turns a pile of rows back
+    // into an answer. security_invoker is what stops it handing Bob's answer
+    // to Alice.
+    await admin.from("consents").insert({
+      patient_id: aliceId,
+      purpose: "research",
+      granted: false,
+      text_version: "rls-test",
+      recorded_by: aliceId,
+      source: "patient_web",
+    });
+
+    const { data, error } = await alice
+      .from("current_consents")
+      .select("patient_id, purpose, granted");
+
+    assert.equal(error, null);
+
+    const research = data?.find((r) => r.purpose === "research");
+    assert.equal(
+      research?.granted,
+      false,
+      "The view returned a superseded answer. A withdrawal that does not take " +
+        "effect is worse than no withdrawal button at all."
+    );
+    assert.ok(
+      (data ?? []).every((r) => r.patient_id === aliceId),
+      "The view leaked another patient's consent, which means security_invoker " +
+        "is not in force."
+    );
+  });
 });

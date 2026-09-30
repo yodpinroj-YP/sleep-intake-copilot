@@ -2,6 +2,10 @@ import "server-only";
 
 import { ISI_SCREENING_QUESTION_KEY } from "@/lib/isi";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  hasAiConsent,
+  readConsents,
+} from "@/services/consent/consent-service";
 import { calculateAgeYears } from "@/services/intake/stopbang-scoring.ts";
 
 import { generateText } from "./gemini";
@@ -57,9 +61,25 @@ export class MissingServiceRoleKeyError extends Error {
   }
 }
 
-export class NothingToSummariseError extends Error {
+/**
+ * Raised when the patient has not agreed to the AI purpose.
+ *
+ * A distinct class so the route can answer 409 rather than 500: nothing has
+ * gone wrong, the system is simply in a state where this request does not
+ * apply — and the clinician should see that as a fact about the patient's
+ * choice, not as an error to retry.
+ */
+export class AiConsentMissingError extends Error {
   constructor() {
     super(
+      "ผู้ป่วยรายนี้ไม่ได้ให้ความยินยอมให้ใช้ปัญญาประดิษฐ์ช่วยเรียบเรียงสรุป — คะแนนและสัญญาณเตือนทั้งหมดยังอ่านได้ตามปกติ"
+    );
+    this.name = "AiConsentMissingError";
+  }
+}
+
+export class NothingToSummariseError extends Error {
+  constructor() {    super(
       "ยังไม่มีคะแนนแบบประเมินสำหรับเคสนี้ — ผู้ป่วยต้องตอบแบบสอบถามอย่างน้อยหนึ่งชุดก่อน"
     );
     this.name = "NothingToSummariseError";
@@ -164,6 +184,22 @@ export async function generateSummaryForSession(
     throw new Error(
       `ไม่พบเคสนี้ (${sessionError?.message ?? "no row"})`
     );
+  }
+
+  // The AI consent gate, and it belongs here rather than in the route.
+  //
+  // This function is the only thing in the codebase that sends patient-derived
+  // data to a third party. Putting the check at the boundary it protects means
+  // no future caller can reach the model by a path that forgot to ask.
+  //
+  // Read with the service-role client because the caller is a clinician, not
+  // the patient — RLS would show a clinician the row anyway under the care
+  // team policy, but this function already holds the admin client and the
+  // question here is a fact about the patient, not about the caller.
+  const consents = await readConsents(admin, session.patient_id);
+
+  if (!hasAiConsent(consents)) {
+    throw new AiConsentMissingError();
   }
 
   const [

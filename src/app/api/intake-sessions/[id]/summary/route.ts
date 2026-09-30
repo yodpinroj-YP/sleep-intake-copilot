@@ -97,7 +97,12 @@ export async function POST(
     // sense", which is a different thing from "you sent something invalid" and
     // leads the clinician to a different action.
     const status =
-      name === "PendingSummaryExistsError" || name === "NothingToSummariseError"
+      name === "PendingSummaryExistsError" ||
+      name === "NothingToSummariseError" ||
+      // The patient declined the AI purpose. Nothing is broken and retrying
+      // will not help, so this is a 409 like the other two states rather than
+      // a 500 that reads as a fault.
+      name === "AiConsentMissingError"
         ? 409
         : 500;
 

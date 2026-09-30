@@ -41,7 +41,12 @@ export type AuditActionName =
   | "summary_rejected"
   | "answers_saved"
   | "answer_retracted"
-  | "session_deleted";
+  | "session_deleted"
+  | "consent_granted"
+  | "consent_withdrawn";
+
+/** Mirrors the check constraint on consents.purpose in 0010_consents.sql. */
+export type ConsentPurposeName = "care" | "ai_summary" | "research";
 export type AiProcessingFeature =
   | "nlu_extraction"
   | "adaptive_question_selection"
@@ -346,8 +351,53 @@ export interface Database {
         Update: never;
         Relationships: [];
       };
+      /**
+       * Append-only, like audit_log and for a related reason: a consent row
+       * has to show what was agreed on the day the data was collected, so
+       * 0010 installs triggers that refuse UPDATE and DELETE. Withdrawal is a
+       * new row with granted = false.
+       */
+      consents: {
+        Row: {
+          id: number;
+          patient_id: string;
+          purpose: ConsentPurposeName;
+          granted: boolean;
+          text_version: string;
+          recorded_at: string;
+          recorded_by: string;
+          source: "patient_web" | "staff_entry";
+        };
+        Insert: {
+          patient_id: string;
+          purpose: ConsentPurposeName;
+          granted: boolean;
+          text_version: string;
+          recorded_at?: string;
+          recorded_by: string;
+          source?: "patient_web" | "staff_entry";
+        };
+        Update: never;
+        Relationships: [];
+      };
     };
-    Views: Record<string, never>;
+    Views: {
+      /**
+       * The newest consent row per (patient, purpose), derived rather than
+       * stored. Declared with security_invoker so the base table's policies
+       * still apply — see the note in 0010_consents.sql.
+       */
+      current_consents: {
+        Row: {
+          patient_id: string;
+          purpose: ConsentPurposeName;
+          granted: boolean;
+          text_version: string;
+          recorded_at: string;
+        };
+        Relationships: [];
+      };
+    };
     Functions: {
       is_clinician: {
         Args: Record<string, never>;
